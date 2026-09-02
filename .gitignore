@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Logs & temp
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Temp screenshots / working files (keep published shots)
+_*.png

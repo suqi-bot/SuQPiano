@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Grand Piano Simulator · 81 键 3D 钢琴模拟器</title>
+<link rel="stylesheet" href="./styles/main.css" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<canvas id="scene"></canvas>
+
+<!-- ================= 顶部标题 ================= -->
+<header class="card title-card">
+  <h1>Grand Piano Simulator</h1>
+  <p class="sub">81 键（E1 – C8）· 实时物理建模合成 · WebGL 三维渲染</p>
+  <ul class="hints">
+    <li><kbd>Z</kbd><kbd>X</kbd><kbd>C</kbd>… 与 <kbd>Q</kbd><kbd>W</kbd><kbd>E</kbd>… 弹奏</li>
+    <li><kbd>Space</kbd> 延音踏板 · <kbd>←</kbd><kbd>→</kbd> 平移八度</li>
+    <li><kbd>1</kbd>–<kbd>5</kbd> 切换视角 · <kbd>L</kbd> 开合琴盖 · <kbd>Esc</kbd> 静音</li>
+    <li>琴键上拖动 = 滑奏；琴身/空白处拖动 = 旋转视角</li>
+  </ul>
+</header>
+
+<!-- ================= 右侧控制面板 ================= -->
+<aside class="card panel" id="panel">
+  <div class="panel-head">
+    <span>控制台</span>
+    <button id="btn-collapse" title="收起/展开">—</button>
+  </div>
+
+  <div class="panel-body">
+    <section>
+      <h2>音色</h2>
+      <label class="row">
+        <span>主音量</span><em id="volume-val">75%</em>
+      </label>
+      <input id="volume" type="range" min="0" max="1" step="0.01" value="0.75" />
+
+      <label class="row">
+        <span>触键力度</span><em id="velocity-val">85%</em>
+      </label>
+      <input id="velocity" type="range" min="0.15" max="1" step="0.01" value="0.85" />
+
+      <label class="row">
+        <span>厅堂混响</span><em id="reverb-val">32%</em>
+      </label>
+      <input id="reverb" type="range" min="0" max="0.9" step="0.01" value="0.32" />
+    </section>
+
+    <section>
+      <h2>演奏</h2>
+      <button id="btn-pedal" class="wide">延音踏板 (Space)<em id="pedal-state">松开</em></button>
+
+      <label class="row"><span>八度平移</span><em id="stat-octave">C3 ~ E5</em></label>
+      <div class="btn-row">
+        <button id="btn-oct-down">◀ 低八度</button>
+        <button id="btn-oct-up">高八度 ▶</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>显示</h2>
+      <label class="row"><span>键面标签</span></label>
+      <select id="sel-label">
+        <option value="none">不显示</option>
+        <option value="keyboard">电脑键位</option>
+        <option value="note">音名 (C4/D#5…)</option>
+      </select>
+
+      <label class="row"><span>视角</span></label>
+      <select id="sel-view">
+        <option value="hero">全貌</option>
+        <option value="player">演奏视角</option>
+        <option value="keys">键面特写</option>
+        <option value="full">全景</option>
+        <option value="top">俯视</option>
+        <option value="side">侧视</option>
+      </select>
+
+      <button id="btn-lid" class="wide">关闭琴盖</button>
+    </section>
+
+    <section>
+      <h2>示范曲</h2>
+      <select id="sel-demo"></select>
+      <div class="btn-row">
+        <button id="btn-demo-play" class="primary">播放</button>
+        <button id="btn-demo-stop" disabled>停止</button>
+      </div>
+    </section>
+  </div>
+</aside>
+
+<!-- ================= 底部状态栏 ================= -->
+<footer class="card status">
+  <div class="stat"><span>当前音</span><b id="stat-note">—</b></div>
+  <div class="stat"><span>力度</span><div class="vel-track"><i id="stat-vel-bar"></i></div></div>
+  <div class="stat"><span>复音数</span><b id="stat-voices">0</b></div>
+  <div class="stat"><span>输出延迟</span><b id="stat-latency">— ms</b></div>
+  <div class="stat"><span>FPS</span><b id="stat-fps">—</b></div>
+</footer>
+
+<!-- ================= 启动遮罩（用于解锁音频） ================= -->
+<div id="start-overlay">
+  <div class="start-card card">
+    <div class="logo">
+      <span class="key white"></span><span class="key black"></span><span class="key white"></span>
+    </div>
+    <h2>3D 钢琴模拟器</h2>
+    <p>81 键标准音域 · 三角钢琴三维建模 · 实时物理建模音源</p>
+    <button id="btn-start" class="primary big">点击进入演奏</button>
+    <small>浏览器需要一次用户交互才能启用音频</small>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

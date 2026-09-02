@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "three": "^0.169.0"
+  },
+  "name": "grand-piano-simulator",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "81 键 3D 钢琴模拟器",
+  "scripts": {
+    "start": "python -m http.server 8123",
+    "check": "node tools/selfcheck.mjs"
+  }
+}
