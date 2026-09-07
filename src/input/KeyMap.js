@@ -2,7 +2,7 @@
  * KeyMap — 电脑键盘 → 半音偏移 的映射（QWERTY 双排钢琴布局）
  * 下排 Z X C V B N M 为白键、S D G H J 为黑键（低八度区）
  * 上排 Q W E R T Y U 为白键、2 3 5 6 7 为黑键（高八度区）
- * 整体覆盖 base ~ base+28（约 2.3 个八度），通过八度平移覆盖 81 键全域。
+ * 整体覆盖 base ~ base+33（约 2.75 个八度），通过八度平移覆盖 81 键全域。
  */
 
 export const KEY_TO_OFFSET = {
@@ -14,6 +14,8 @@ export const KEY_TO_OFFSET = {
   KeyQ: 12, Digit2: 13, KeyW: 14, Digit3: 15, KeyE: 16, KeyR: 17, Digit5: 18,
   KeyT: 19, Digit6: 20, KeyY: 21, Digit7: 22, KeyU: 23,
   KeyI: 24, Digit9: 25, KeyO: 26, Digit0: 27, KeyP: 28,
+  // ---- 符号键（紧接 P 右侧，落在白键 F5 / G5 / A5）----
+  BracketLeft: 29, BracketRight: 31, Backslash: 33,
 };
 
 /** 每个半音偏移优先展示的按键字符（用于键面贴标） */
@@ -22,11 +24,12 @@ export const OFFSET_LABELS = [
   ',', 'L', '.', ';', '/',
   'R', '5', 'T', '6', 'Y', '7', 'U',
   'I', '9', 'O', '0', 'P',
+  '[', '', ']', '', '\\',
 ];
 
 export const CODE_DISPLAY = {
   Comma: ',', Period: '.', Slash: '/', Semicolon: ';', Quote: "'",
-  BracketLeft: '[', BracketRight: ']', Minus: '-', Equal: '=',
+  BracketLeft: '[', BracketRight: ']', Backslash: '\\', Minus: '-', Equal: '=',
 };
 
 export function codeToLabel(code) {
@@ -36,7 +39,8 @@ export function codeToLabel(code) {
   return code;
 }
 
-/** 由半音偏移反查应该贴在琴键上的标签 */
+/** 由半音偏移反查应该贴在琴键上的标签；无对应物理键时返回 null */
 export function labelForOffset(offset) {
-  return OFFSET_LABELS[offset] ?? null;
+  const l = OFFSET_LABELS[offset];
+  return (l && l.length) ? l : null;
 }

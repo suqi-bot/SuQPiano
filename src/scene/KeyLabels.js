@@ -120,7 +120,11 @@ export class KeyLabels {
       plane.renderOrder = 3;
 
       const holder = new THREE.Object3D();
-      holder.position.set(0, key.topY + 0.0011, key.length - (key.isBlack ? 0.048 : 0.033));
+      // 键围绕 balance rail 旋转（pivot 不在键后端），
+      // 这里把标签放在"键前缘上方"的世界坐标，转为 pivot 局部坐标
+      const labelLocalY = (key.topY - key.pivotY) + 0.0011;
+      const frontLocalZ = (key.frontZ - key.pivotZ) - (key.isBlack ? 0.048 : 0.033);
+      holder.position.set(0, labelLocalY, frontLocalZ);
       holder.add(plane);
       key.pivot.add(holder);                     // 跟随琴键运动
       objects.push(holder);

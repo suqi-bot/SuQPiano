@@ -24,7 +24,8 @@
   <p class="sub">81 键（E1 – C8）· 实时物理建模合成 · WebGL 三维渲染</p>
   <ul class="hints">
     <li><kbd>Z</kbd><kbd>X</kbd><kbd>C</kbd>… 与 <kbd>Q</kbd><kbd>W</kbd><kbd>E</kbd>… 弹奏</li>
-    <li><kbd>Space</kbd> 延音踏板 · <kbd>←</kbd><kbd>→</kbd> 平移八度</li>
+    <li>符号键 <kbd>[</kbd><kbd>]</kbd><kbd>\</kbd> 也当作琴键（接在 P 右侧）</li>
+    <li><kbd>Space</kbd> 延音 · <kbd>Shift</kbd>+<kbd>Space</kbd> 持音 · <kbd>Alt</kbd>+<kbd>Space</kbd> 柔音</li>
     <li><kbd>1</kbd>–<kbd>5</kbd> 切换视角 · <kbd>L</kbd> 开合琴盖 · <kbd>Esc</kbd> 静音</li>
     <li>琴键上拖动 = 滑奏；琴身/空白处拖动 = 旋转视角</li>
   </ul>
@@ -58,9 +59,13 @@
 
     <section>
       <h2>演奏</h2>
-      <button id="btn-pedal" class="wide">延音踏板 (Space)<em id="pedal-state">松开</em></button>
+      <div class="pedal-row" aria-label="三踏板控制">
+        <button id="btn-pedal-soft" class="pedal-btn">柔音<small>Alt+Space</small><em id="pedal-soft-state">松开</em></button>
+        <button id="btn-pedal-sostenuto" class="pedal-btn">持音<small>Shift+Space</small><em id="pedal-sostenuto-state">松开</em></button>
+        <button id="btn-pedal" class="pedal-btn">延音<small>Space</small><em id="pedal-state">松开</em></button>
+      </div>
 
-      <label class="row"><span>八度平移</span><em id="stat-octave">C3 ~ E5</em></label>
+      <label class="row"><span>八度平移</span><em id="stat-octave">C3 ~ A5</em></label>
       <div class="btn-row">
         <button id="btn-oct-down">◀ 低八度</button>
         <button id="btn-oct-up">高八度 ▶</button>
@@ -82,7 +87,7 @@
         <option value="player">演奏视角</option>
         <option value="keys">键面特写</option>
         <option value="full">全景</option>
-        <option value="top">俯视</option>
+        <option value="top">内腔俯视</option>
         <option value="side">侧视</option>
       </select>
 
@@ -97,8 +102,58 @@
         <button id="btn-demo-stop" disabled>停止</button>
       </div>
     </section>
+
+    <section>
+      <h2>录制</h2>
+      <div class="btn-row">
+        <button id="btn-rec">● 录制</button>
+        <button id="btn-rec-play" class="primary">循环播放</button>
+      </div>
+      <div class="btn-row">
+        <button id="btn-rec-stop" disabled>停止</button>
+        <button id="btn-rec-clear">清空</button>
+      </div>
+      <label class="row"><span>已录音符</span><em id="rec-status">0 个</em></label>
+      <button id="btn-note-editor" class="wide" title="打开 Piano Roll 音符编辑器，精细修改刚录的音符">音符编辑器</button>
+    </section>
   </div>
 </aside>
+
+<!-- ================= 左侧实时音名流 ================= -->
+<aside class="card note-waterfall" id="note-waterfall" aria-label="实时音名流">
+  <div class="wf-head">
+    <span>音名流</span>
+    <button id="btn-wf-clear" title="清空">清</button>
+  </div>
+  <div class="wf-stream" id="wf-stream"></div>
+</aside>
+
+<!-- ================= 音符编辑器（Piano Roll 覆盖层） ================= -->
+<div class="editor-host" id="note-editor" hidden>
+  <div class="pro" id="pro-root">
+    <div class="pro-toolbar">
+      <div class="pro-group">
+        <button data-act="play" class="primary" title="播放/循环当前编辑结果">▶ 播放</button>
+        <button data-act="undo" title="撤销 (Ctrl+Z)">撤销</button>
+        <button data-act="redo" title="重做 (Ctrl+Shift+Z / Ctrl+Y)">重做</button>
+        <button data-act="del" title="删除选中 (Del)">删除</button>
+        <button data-act="paste" title="粘贴 (Ctrl+V)">粘贴</button>
+      </div>
+      <div class="pro-group pro-zoom">
+        <button data-act="zoomIn" title="放大">＋</button>
+        <button data-act="zoomOut" title="缩小">－</button>
+        <button data-act="fit" title="适配全部音符">适配</button>
+      </div>
+      <div class="pro-hint">音符上拖=移动 · 拖两端=改时长 · 空白拖=框选 · 双击=新建 · Esc=取消</div>
+      <div class="pro-actions">
+        <button data-act="reset" title="放弃改动，恢复为本次编辑前的录音">放弃</button>
+        <button data-act="apply" class="primary" title="保存修改并退出（循环回放将使用新数据）">✓ 应用</button>
+      </div>
+    </div>
+    <div class="pro-body"><canvas class="pro-canvas"></canvas></div>
+    <div class="pro-foot">选中 <b data-f="sel">0</b> · 音符 <b data-f="total">0</b></div>
+  </div>
+</div>
 
 <!-- ================= 底部状态栏 ================= -->
 <footer class="card status">

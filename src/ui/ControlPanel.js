@@ -4,7 +4,8 @@
  */
 
 import { DEMO_SONGS } from '../app/DemoSongs.js';
-import { midiToName } from '../core/NoteUtils.js';
+import { midiToName, isBlackKey } from '../core/NoteUtils.js';
+import { NoteWaterfall } from './NoteWaterfall.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -13,6 +14,7 @@ export class ControlPanel {
     this.app = app;
     this.values = { volume: 0.75, velocity: 0.85, reverb: 0.32 };
     this._lastStatus = {};
+    this.waterfall = new NoteWaterfall($('wf-stream'));
     this._build();
   }
 
@@ -47,11 +49,20 @@ export class ControlPanel {
       this._text('reverb-val', Math.round(v * 100) + '%');
     });
 
-    // ---- 延音踏板 ----
-    const pedal = $('btn-pedal');
-    pedal?.addEventListener('pointerdown', (e) => { e.preventDefault(); app.setPedal(true); });
-    window.addEventListener('pointerup', () => app.setPedal(false));
-    pedal?.addEventListener('click', (e) => e.preventDefault());
+    // ---- 三踏板：右延音 / 中持音 / 左柔音 ----
+    const pedals = [
+      ['btn-pedal', 0], ['btn-pedal-sostenuto', 1], ['btn-pedal-soft', 2],
+    ];
+    for (const [id, index] of pedals) {
+      const pedal = $(id);
+      if (!pedal) continue;
+      pedal.addEventListener('pointerdown', (e) => {
+        e.preventDefault(); pedal.setPointerCapture?.(e.pointerId); app.setPedal(index, true);
+      });
+      pedal.addEventListener('pointerup', (e) => { e.preventDefault(); app.setPedal(index, false); });
+      pedal.addEventListener('pointercancel', () => app.setPedal(index, false));
+      pedal.addEventListener('click', (e) => e.preventDefault());
+    }
 
     // ---- 标签模式 ----
     $('sel-label')?.addEventListener('change', (e) => app.setLabelMode(e.target.value));
@@ -69,9 +80,30 @@ export class ControlPanel {
     });
     $('btn-demo-stop')?.addEventListener('click', () => app.stopDemo());
 
+    // ---- 录制 / 循环回放 ----
+    $('btn-rec')?.addEventListener('click', () => app.recorder.toggleRecord());
+    $('btn-rec-play')?.addEventListener('click', async () => {
+      await app.ensureAudio();
+      app.recorder.play(true);
+    });
+    $('btn-rec-stop')?.addEventListener('click', () => app.recorder.stopPlay());
+    $('btn-rec-clear')?.addEventListener('click', () => app.recorder.clear());
+
+    // ---- 音符编辑器 ----
+    $('btn-note-editor')?.addEventListener('click', async () => {
+      if (!app.recorder.editableNotes().length) {
+        // 无内容也允许进入，便于双击空白新建
+      }
+      await app.ensureAudio().catch(() => {});
+      app.noteEditor.open();
+    });
+
     // ---- 八度平移按钮 ----
     $('btn-oct-down')?.addEventListener('click', () => app.input._shiftOctave(-1));
     $('btn-oct-up')?.addEventListener('click', () => app.input._shiftOctave(1));
+
+    // ---- 音名流清空 ----
+    $('btn-wf-clear')?.addEventListener('click', () => this.waterfall?.clear());
 
     // ---- 初始化文本 ----
     ['volume', 'velocity', 'reverb'].forEach((k) => {
@@ -90,10 +122,13 @@ export class ControlPanel {
 
   _text(id, txt) { const el = $(id); if (el) el.textContent = txt; }
 
-  setPedalState(on) {
-    const el = $('btn-pedal');
+  setPedalState(index, on) {
+    if (typeof index === 'boolean') { on = index; index = 0; }
+    const ids = ['btn-pedal', 'btn-pedal-sostenuto', 'btn-pedal-soft'];
+    const labels = ['pedal-state', 'pedal-sostenuto-state', 'pedal-soft-state'];
+    const el = $(ids[index]);
     if (el) el.classList.toggle('is-active', on);
-    this._text('pedal-state', on ? '踩下' : '松开');
+    this._text(labels[index], on ? '踩下' : '松开');
   }
 
   setLidState(open) {
@@ -113,16 +148,32 @@ export class ControlPanel {
     if (s) s.disabled = !playing;
   }
 
+  /** 录制 / 回放状态联动（Recorder 调用） */
+  setRecorderState(state) {
+    if (state.recording !== undefined) {
+      const b = $('btn-rec');
+      if (b) { b.textContent = state.recording ? '■ 停止录制' : '● 录制'; b.classList.toggle('is-active', state.recording); }
+    }
+    if (state.playing !== undefined) {
+      const p = $('btn-rec-play'), s = $('btn-rec-stop');
+      p?.classList.toggle('is-active', state.playing);
+      if (p) p.textContent = state.playing ? '循环中…' : '循环播放';
+      if (s) s.disabled = !state.playing;
+    }
+    if (state.count !== undefined) this._text('rec-status', `${state.count} 个`);
+  }
+
   onNoteOn(midi, vel) {
     this._text('stat-note', midiToName(midi) + '  (' + midi + ')');
     const bar = $('stat-vel-bar');
     if (bar) bar.style.width = Math.round(vel * 100) + '%';
+    this.waterfall?.push(midiToName(midi), vel, isBlackKey(midi));
   }
 
   updateStatus(info) {
     if (info.note) this._text('stat-note', `${info.note.name}  (${info.note.midi})`);
     if (info.octaveBase !== undefined) {
-      this._text('stat-octave', `${midiToName(info.octaveBase)} ~ ${midiToName(info.octaveBase + 28)}`);
+      this._text('stat-octave', `${midiToName(info.octaveBase)} ~ ${midiToName(info.octaveBase + 33)}`);
     }
     if (info.voices !== undefined) this._text('stat-voices', String(info.voices));
     if (info.fps !== undefined) this._text('stat-fps', String(info.fps));

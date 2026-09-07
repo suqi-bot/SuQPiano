@@ -1,676 +1,875 @@
 /**
- * PianoModel — 三角钢琴（Grand Piano）参数化建模（视觉重建版）
+ * PianoModel — clean-room grand-piano model.
  *
- * 设计目标：一眼就能认出是「三角钢琴」。
- * 与旧版相比的关键修正：
- *   1. 琴弦/铸铁框移到键盘上方（真实钢琴中琴弦高于键面），打开琴盖看到的是「琴弦槽」而非下沉空腔；
- *   2. 琴身边缘(rim)整体加高，轮廓更加修长优雅（纵深 1.62m）；
- *   3. 键盘向前探出琴身，前有低矮的正面踢脚板、两侧颊木，不会被过高的前壁遮挡；
- *   4. 高光漆面材质 + 木质音板 + 金色铭牌 + 红呢条等细节，强化「钢琴」质感。
- *
- * 全部尺寸按真实钢琴物理比例（单位：米）：白键 23.5mm / 黑键 13.7mm / 八度 164.5mm / 键深 10mm / 键面高 ~72cm。
+ * 坐标约定：X=键盘左右，Y=高度，+Z=演奏者方向。
+ * 这个文件不复用旧版的轮廓偏移、复杂布尔几何或悬空结构，
+ * 采用明确的分层结构：琴身 / 音板 / 铁板 / 键盘 / 击弦机 / 制音器 / 琴盖 / 踏板。
  */
 
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { computeKeyLayout, midiToFreq } from '../core/NoteUtils.js';
+import { computeKeyLayout } from '../core/NoteUtils.js';
 
-// ============================ 尺寸常量 ============================
-const FLOOR_Y = -0.50;         // 地面高度 → 琴腿 50cm，键面距地 72cm
-const RIM_H = 0.44;            // 琴身边缘(rim)上沿高度 → 离地 94cm
-const RIM_WALL = 0.05;         // 琴身壁厚
-const INNER_RIM_TOP = 0.35;    // 内框（音板周圈）上沿
-const WHITE_TOP = 0.22;        // 白键上表面（离地 72cm）
-const KEY_H = 0.022;           // 白键厚度
-const BLACK_RISE = 0.0115;     // 黑键高出白键面
-const BLACK_H = 0.034;         // 黑键总高
-const KEY_DIP = 0.010;         // 键按下下沉量（垂直下压）
-const SB_Y = 0.10;             // 音板上表面
-const PLATE_Y = 0.375;         // 铸铁框上表面（高于内框，贴近琴身边缘，内构清晰可见）
-const STRING_Y = 0.395;        // 琴弦高度（高于内框上沿，打开琴盖即清晰可见）
+const FLOOR_Y = -0.50;
+const KEY_TOP = 0.22;
+const KEY_H = 0.022;
+const BLACK_H = 0.034;
+const KEY_FRONT_Z = 0.158;
+const KEY_BACK_Z = 0.004;
+const BALANCE_Z = 0.052;
+const RIM_TOP = 0.44;
+const SOUND_TOP = 0.300;
+const PLATE_TOP = 0.352;
+const STRING_Y = 0.395;
+const BRIDGE_TREBLE_Z = -0.460;
+const BRIDGE_BASS_Z = -0.930;
 
-// ============================ 几何工具 ============================
-
-/** 上顶面收窄的盒子（用于黑键的梯形截面） */
-function taperedBoxGeometry(w, h, l, topScaleX, topScaleZ) {
-  const g = new THREE.BoxGeometry(w, h, l);
-  const pos = g.attributes.position;
-  for (let i = 0; i < pos.count; i++) {
-    if (pos.getY(i) > 0) {
-      pos.setX(i, pos.getX(i) * topScaleX);
-      pos.setZ(i, pos.getZ(i) * topScaleZ);
-    }
-  }
-  pos.needsUpdate = true;
-  g.computeVertexNormals();
-  return g;
+function matPhysical(color, roughness, metalness = 0, extra = {}) {
+  return new THREE.MeshPhysicalMaterial({
+    color, roughness, metalness,
+    envMapIntensity: 1.0,
+    ...extra,
+  });
 }
 
-/** 多边形向内/向外等距偏移（带尖角斜接限制） */
-function offsetPolygon(pts, d) {
-  const n = pts.length;
-  const area = pts.reduce((s, p, i) => {
-    const q = pts[(i + 1) % n];
-    return s + (p.x * q.y - q.x * p.y);
-  }, 0);
-  const sign = area > 0 ? 1 : -1;
-  const out = [];
+function createMaterials() {
+  return {
+    ebony: matPhysical(0x08090d, 0.16, 0.02, { clearcoat: 1, clearcoatRoughness: 0.06, envMapIntensity: 1.6 }),
+    ebonySat: matPhysical(0x17191f, 0.30, 0.03, { clearcoat: 0.45, clearcoatRoughness: 0.18 }),
+    whiteKey: matPhysical(0xf3f0e8, 0.25, 0.02, { clearcoat: 0.35, clearcoatRoughness: 0.16 }),
+    blackKey: matPhysical(0x11131a, 0.20, 0.02, { clearcoat: 0.85, clearcoatRoughness: 0.10 }),
+    felt: new THREE.MeshStandardMaterial({ color: 0x7e1c2b, roughness: 0.96 }),
+    feltWhite: new THREE.MeshStandardMaterial({ color: 0xf0eee2, roughness: 0.86 }),
+    feltDark: new THREE.MeshStandardMaterial({ color: 0x342331, roughness: 0.92 }),
+    soundboard: matPhysical(0xb87943, 0.58, 0.02, { clearcoat: 0.18, clearcoatRoughness: 0.42 }),
+    woodLight: matPhysical(0x8f522d, 0.54, 0.02),
+    bridge: matPhysical(0x6d3a1c, 0.50, 0.02, { clearcoat: 0.20, clearcoatRoughness: 0.35 }),
+    plate: matPhysical(0x9a7230, 0.46, 0.55, { clearcoat: 0.30, clearcoatRoughness: 0.18, envMapIntensity: 1.25 }),
+    brass: matPhysical(0xb28a38, 0.25, 0.82, { clearcoat: 0.20, clearcoatRoughness: 0.16 }),
+    steel: matPhysical(0xf6f9fd, 0.16, 0.52, { envMapIntensity: 2.0 }),
+    copper: matPhysical(0xc2793f, 0.30, 0.62, { envMapIntensity: 1.6 }),
+    leather: matPhysical(0x25252a, 0.62, 0.02, { clearcoat: 0.16 }),
+    _screw: matPhysical(0x25262b, 0.34, 0.76),
+  };
+}
+
+function cubicPoint(a, b, c, d, t) {
+  const u = 1 - t;
+  return new THREE.Vector2(
+    u ** 3 * a.x + 3 * u ** 2 * t * b.x + 3 * u * t ** 2 * c.x + t ** 3 * d.x,
+    u ** 3 * a.y + 3 * u ** 2 * t * b.y + 3 * u * t ** 2 * c.y + t ** 3 * d.y,
+  );
+}
+
+function outlinePoints(width, depth) {
+  const x0 = -0.048;
+  const x1 = width + 0.048;
+  const cx = width * 0.50;
+  const points = [
+    new THREE.Vector2(x0, 0.012),
+    new THREE.Vector2(x1, 0.012),
+    new THREE.Vector2(x1 + 0.004, -0.16),
+  ];
+  // 高音侧外缘到尾部的长圆弧，贴近参考图中的翼形外轮廓。
+  const a = points[points.length - 1];
+  const d = new THREE.Vector2(cx + 0.08, -depth);
+  for (let i = 1; i <= 9; i++) points.push(cubicPoint(
+    a,
+    new THREE.Vector2(x1 + 0.012, -0.56),
+    new THREE.Vector2(x1 - 0.14, -1.16),
+    d,
+    i / 9,
+  ));
+  // 低音侧回到键盘前沿，避免尖角和突然的折返。
+  const a2 = points[points.length - 1];
+  const d2 = new THREE.Vector2(x0 + 0.018, -1.26);
+  for (let i = 1; i <= 9; i++) points.push(cubicPoint(
+    a2,
+    new THREE.Vector2(cx - 0.34, -depth + 0.02),
+    new THREE.Vector2(x0 + 0.025, -1.12),
+    d2,
+    i / 9,
+  ));
+  points.push(
+    new THREE.Vector2(x0 + 0.010, -0.88),
+    new THREE.Vector2(x0 + 0.002, -0.48),
+    new THREE.Vector2(x0, -0.20),
+  );
+  return points;
+}
+
+/** 沿角平分线把闭合轮廓向内偏移 inset（等宽）。 */
+function offsetPolygon(points, inset) {
+  // 内法线方向取决于绕向：CCW 时每条有向边的左侧就是内侧。
+  const dir = signedArea2(points) > 0 ? 1 : -1;
+  const n = points.length;
+  const result = [];
   for (let i = 0; i < n; i++) {
-    const p = pts[i];
-    const a = pts[(i - 1 + n) % n];
-    const b = pts[(i + 1) % n];
-    const n1 = edgeNormal(a, p, sign);
-    const n2 = edgeNormal(p, b, sign);
-    let nx = n1.x + n2.x, ny = n1.y + n2.y;
-    const len = Math.hypot(nx, ny) || 1;
-    nx /= len; ny /= len;
-    const dot = Math.max(-1, Math.min(1, n1.x * n2.x + n1.y * n2.y));
-    const miter = Math.min(2.2, 1 / Math.max(0.45, Math.sqrt((1 + dot) / 2)));
-    out.push(new THREE.Vector2(p.x + nx * d * miter, p.y + ny * d * miter));
+    const p = points[i];
+    const prev = points[(i - 1 + n) % n];
+    const next = points[(i + 1) % n];
+    const e1 = new THREE.Vector2(p.x - prev.x, p.y - prev.y).normalize();
+    const e2 = new THREE.Vector2(next.x - p.x, next.y - p.y).normalize();
+    const nx1 = -e1.y * dir, ny1 = e1.x * dir;
+    const nx2 = -e2.y * dir, ny2 = e2.x * dir;
+    const mx = nx1 + nx2;
+    const my = ny1 + ny2;
+    const len = Math.hypot(mx, my);
+    if (len < 1e-6) { result.push(new THREE.Vector2(p.x, p.y)); continue; }
+    // miter 长 = inset / cos(θ/2)，限幅到 3×inset 避免尖角处伸出长刺。
+    const m = Math.min(inset * 3, (inset * 2) / len);
+    result.push(new THREE.Vector2(p.x + (mx / len) * m, p.y + (my / len) * m));
   }
-  return out;
+  return result;
 }
 
-function edgeNormal(a, b, sign) {
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const len = Math.hypot(dx, dy) || 1;
-  return { x: (dy / len) * sign, y: (-dx / len) * sign };
+/**
+ * 把轮廓向内收一圈，且保证结果严格嵌套（可安全地当作环的内孔）。
+ *
+ * 旧实现在 y<-0.02 分支上按 0.925 缩放 y：对第二次、第三次调用的轮廓来说，
+ * 前缘点会被推向演奏者（即轮廓之外），于是 ringGeometry 的内孔跑到外形之外，
+ * ExtrudeGeometry 的 earcut 直接丢弃这个孔，环退化成整块实心板，
+ * 从 y=0.42 与 y=0.37 两层把音板/琴弦/击弦机全部盖住 —— 就是"内构不显示"的根因。
+ */
+function insetPoints(points, inset = 0.05) {
+  let pts = offsetPolygon(points, inset);
+  const c = centroid2(points);
+  // 非凸轮廓（翼形弯侧与直边交接处）上偏移可能把点甩到母轮廓之外，
+  // 所以再整体向质心微量收缩，直到每个顶点都严格落在内部。
+  for (let guard = 0; guard < 40 && !pts.every((p) => insidePoly(points, p.x, p.y)); guard++) {
+    pts = pts.map((p) => new THREE.Vector2(c.x + (p.x - c.x) * 0.995, c.y + (p.y - c.y) * 0.995));
+  }
+  return pts;
 }
 
-/** 把 (x, depth) 平面的 Shape 挤出成厚度沿 +Y 的板，depth 轴映射到 -Z */
-function extrudeUp(shape, thickness, curveSegments = 48) {
+function centroid2(points) {
+  const s = points.reduce((acc, p) => acc.add(p), new THREE.Vector2());
+  return s.multiplyScalar(1 / points.length);
+}
+
+/** 把 X/Z 平面轮廓挤出成 Y 方向几何。轮廓第二坐标使用 -Z。 */
+function extrudedPlanar(points, height, bevel = 0) {
+  const shape = new THREE.Shape();
+  points.forEach((p, i) => i ? shape.lineTo(p.x, -p.y) : shape.moveTo(p.x, -p.y));
+  shape.closePath();
   const geo = new THREE.ExtrudeGeometry(shape, {
-    depth: thickness, bevelEnabled: false, curveSegments, steps: 1,
+    depth: height,
+    bevelEnabled: bevel > 0,
+    bevelThickness: bevel,
+    bevelSize: bevel,
+    bevelSegments: 2,
+    curveSegments: 2,
+    steps: 1,
   });
   geo.rotateX(-Math.PI / 2);
   return geo;
 }
 
 /**
- * 三角钢琴翼形轮廓（x: 左右，d: 0=琴身前沿(键盘侧) → D=琴尾）
- * 低音侧（左侧）为近乎直线长边，高音侧（右侧）外鼓后收束到琴尾。
+ * 带任意个内孔的面板，挤出成 Y 方向几何。
+ * 所有孔必须严格落在外轮廓内部，否则 earcut 会静默丢孔、面板退化成实心板。
  */
-function buildBodyShape(x0, x1, D) {
-  const W = x1 - x0;
-  const s = new THREE.Shape();
-  s.moveTo(x0, 0);                                                        // 前缘左端（低音端）
-  s.lineTo(x1, 0);                                                        // 前缘右端（高音端）
-  s.bezierCurveTo(x1 + W * 0.02, D * 0.16, x1 + W * 0.15, D * 0.58, x0 + W * 0.90, D * 0.95); // 高音侧外鼓曲线
-  s.quadraticCurveTo(x0 + W * 0.62, D * 1.05, x0 + W * 0.36, D * 0.99);  // 琴尾
-  s.quadraticCurveTo(x0 + W * 0.02, D * 0.72, x0 + W * 0.008, D * 0.32); // 低音侧长直边
-  s.lineTo(x0, 0);
-  s.closePath();
-  return s;
-}
-
-/** 在两点之间放置一根圆柱（用于顶盖支撑杆） */
-function orientCylinder(mesh, a, b) {
-  const dir = new THREE.Vector3().subVectors(b, a);
-  const len = dir.length();
-  mesh.position.copy(a).addScaledVector(dir, 0.5);
-  mesh.scale.set(1, len, 1);
-  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
-}
-
-function lerp(a, b, t) { return a + (b - a) * t; }
-
-// ============================ 程序化纹理 ============================
-
-/** 云杉木纹（音板） */
-function woodGrainTexture() {
-  const c = document.createElement('canvas');
-  c.width = 256; c.height = 256;
-  const g = c.getContext('2d');
-  g.fillStyle = '#dcb87f';
-  g.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 46; i++) {
-    const y = Math.random() * 256;
-    g.strokeStyle = `rgba(${140 + Math.random() * 30 | 0},${92 + Math.random() * 20 | 0},42,${0.07 + Math.random() * 0.12})`;
-    g.lineWidth = 1 + Math.random() * 2.2;
-    g.beginPath();
-    g.moveTo(0, y);
-    let yy = y;
-    for (let x = 0; x <= 256; x += 32) { yy += (Math.random() - 0.5) * 7; g.lineTo(x, yy); }
-    g.stroke();
+function slabGeometry(outerPts, holePtsList, height) {
+  const shape = new THREE.Shape();
+  outerPts.forEach((p, i) => (i ? shape.lineTo(p.x, -p.y) : shape.moveTo(p.x, -p.y)));
+  shape.closePath();
+  for (const holePts of holePtsList) {
+    const hole = new THREE.Path();
+    [...holePts].reverse().forEach((p, i) => (i ? hole.lineTo(p.x, -p.y) : hole.moveTo(p.x, -p.y)));
+    hole.closePath();
+    shape.holes.push(hole);
   }
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  return tex;
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false, curveSegments: 2, steps: 1 });
+  geo.rotateX(-Math.PI / 2);
+  return geo;
 }
 
-/** 金色铭牌文字（黄铜底 + 暗刻 GRAND） */
-function nameBoardTexture() {
-  const c = document.createElement('canvas');
-  c.width = 1024; c.height = 128;
-  const g = c.getContext('2d');
-  // 黄铜渐变底
-  const grad = g.createLinearGradient(0, 0, 0, 128);
-  grad.addColorStop(0, '#dcbd6e');
-  grad.addColorStop(0.5, '#c9a24e');
-  grad.addColorStop(1, '#b38e3d');
-  g.fillStyle = grad;
-  g.fillRect(0, 0, 1024, 128);
-  // 暗刻边框
-  g.strokeStyle = 'rgba(60,40,10,0.55)'; g.lineWidth = 6;
-  g.strokeRect(30, 14, 964, 100);
-  g.strokeStyle = 'rgba(255,235,180,0.55)'; g.lineWidth = 2;
-  g.strokeRect(38, 22, 948, 84);
-  // 暗刻文字（带一点高光偏移做出雕刻感）
-  g.textAlign = 'center'; g.textBaseline = 'middle';
-  g.font = '600 58px Georgia, "Times New Roman", "Songti SC", serif';
-  g.fillStyle = 'rgba(52,34,8,0.85)';
-  g.fillText('GRAND', 512, 68);
-  g.fillStyle = 'rgba(255,240,200,0.35)';
-  g.fillText('GRAND', 510, 66);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  return tex;
+function ringGeometry(outer, inner, height) {
+  return slabGeometry(outer, [inner], height);
 }
 
-// ============================ 材质 ============================
-
-function createMaterials() {
-  const wood = woodGrainTexture();
-  return {
-    ebony: new THREE.MeshPhysicalMaterial({          // 高光乌木漆面（外壳/顶盖/颊木）
-      color: 0x0c0c0e, roughness: 0.07, metalness: 0.05,
-      clearcoat: 1, clearcoatRoughness: 0.045, envMapIntensity: 1.55,
-    }),
-    ebonySat: new THREE.MeshPhysicalMaterial({       // 亚光乌木（底板/内舱）
-      color: 0x141416, roughness: 0.55, metalness: 0.0,
-      clearcoat: 0.25, clearcoatRoughness: 0.4,
-    }),
-    innerRim: new THREE.MeshPhysicalMaterial({       // 内框（音板周圈）
-      color: 0x1d1d20, roughness: 0.32, metalness: 0.0,
-      clearcoat: 0.5, clearcoatRoughness: 0.2,
-    }),
-    soundboard: new THREE.MeshPhysicalMaterial({     // 云杉音板
-      map: wood, color: 0xf5e9cf, roughness: 0.58, metalness: 0.0,
-      clearcoat: 0.3, clearcoatRoughness: 0.5, envMapIntensity: 0.9,
-    }),
-    plate: new THREE.MeshStandardMaterial({          // 铸铁框（亮金，微自发光保证可见）
-      color: 0xd8b25c, roughness: 0.34, metalness: 0.75, envMapIntensity: 2.1,
-      emissive: 0x4a2c00, emissiveIntensity: 0.38,
-    }),
-    steel: new THREE.MeshStandardMaterial({          // 钢弦
-      color: 0xeee9de, roughness: 0.20, metalness: 1.0, envMapIntensity: 1.9,
-      emissive: 0x202020, emissiveIntensity: 0.10,
-    }),
-    copper: new THREE.MeshStandardMaterial({         // 铜缠弦
-      color: 0xc98a48, roughness: 0.30, metalness: 1.0, envMapIntensity: 1.9,
-      emissive: 0x2a1600, emissiveIntensity: 0.22,
-    }),
-    felt: new THREE.MeshStandardMaterial({ color: 0x8c2025, roughness: 0.98, metalness: 0.0 }),
-    feltDark: new THREE.MeshStandardMaterial({ color: 0x5a1417, roughness: 1.0, metalness: 0.0 }),
-    feltWhite: new THREE.MeshStandardMaterial({ color: 0xf0ede3, roughness: 0.95, metalness: 0.0 }),
-    brass: new THREE.MeshStandardMaterial({ color: 0xcfa752, roughness: 0.24, metalness: 1.0 }),
-    whiteKey: new THREE.MeshPhysicalMaterial({
-      color: 0xf6f3ec, roughness: 0.28, metalness: 0.0,
-      clearcoat: 0.55, clearcoatRoughness: 0.12, envMapIntensity: 0.85,
-    }),
-    blackKey: new THREE.MeshPhysicalMaterial({
-      color: 0x101014, roughness: 0.12, metalness: 0.0,
-      clearcoat: 1, clearcoatRoughness: 0.05, envMapIntensity: 1.3,
-    }),
-    leather: new THREE.MeshPhysicalMaterial({ color: 0x232328, roughness: 0.6, clearcoat: 0.2 }),
+/** 圆角矩形孔，点序与 outlinePoints 同向（外轮廓 -> 近端左 -> 近端右 -> 远端右 -> 远端左）。 */
+function rectPts(x0, x1, yNear, yFar, r = 0.014, seg = 3) {
+  const pts = [];
+  const arc = (cx, cy, a0, a1) => {
+    for (let i = 0; i <= seg; i++) {
+      const a = a0 + (a1 - a0) * (i / seg);
+      pts.push(new THREE.Vector2(cx + r * Math.cos(a), cy + r * Math.sin(a)));
+    }
   };
+  arc(x0 + r, yNear - r, Math.PI, Math.PI / 2);
+  arc(x1 - r, yNear - r, Math.PI / 2, 0);
+  arc(x1 - r, yFar + r, 0, -Math.PI / 2);
+  arc(x0 + r, yFar + r, -Math.PI / 2, -Math.PI);
+  return pts;
 }
 
-// ============================ 主构建函数 ============================
+/** 圆孔（铁板上的 hand hole），点序同上。 */
+function circlePts(cx, cy, radius, seg = 14) {
+  const pts = [];
+  for (let i = 0; i < seg; i++) {
+    const a = -(Math.PI * 2 * i) / seg;
+    pts.push(new THREE.Vector2(cx + radius * Math.cos(a), cy + radius * Math.sin(a)));
+  }
+  return pts;
+}
+
+/** 把一组孔点向自身质心缩到完全落进 poly 内部（含 margin 安全边距）；失败返回 null。 */
+function shrinkInside(pts, poly, margin = 0.010) {
+  const c = centroid2(pts);
+  let k = 1;
+  for (let step = 0; step < 40; step++) {
+    const cand = pts.map((p) => new THREE.Vector2(c.x + (p.x - c.x) * k, c.y + (p.y - c.y) * k));
+    let fits = true;
+    for (const p of cand) {
+      if (!insidePoly(poly, p.x, p.y)
+        || !insidePoly(poly, p.x - margin, p.y) || !insidePoly(poly, p.x + margin, p.y)
+        || !insidePoly(poly, p.x, p.y - margin) || !insidePoly(poly, p.x, p.y + margin)) {
+        fits = false;
+        break;
+      }
+    }
+    if (fits) return cand;
+    k *= 0.93;
+    if (k < 0.05) return null;
+  }
+  return null;
+}
+
+/** 点 (x, z) 是否在 X/Z 平面轮廓多边形内（轮廓第二坐标即 z）。 */
+function insidePoly(pts, x, z) {
+  let ok = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const yi = pts[i].y;
+    const yj = pts[j].y;
+    if ((yi > z) !== (yj > z) && x < ((pts[j].x - pts[i].x) * (z - yi)) / (yj - yi) + pts[i].x) ok = !ok;
+  }
+  return ok;
+}
+
+function signedArea2(pts) {
+  let s = 0;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    s += pts[j].x * pts[i].y - pts[i].x * pts[j].y;
+  }
+  return s / 2;
+}
+
+/**
+ * 两个凸多边形的最短分离距离（SAT）；负值表示已经互相重叠。
+ * ExtrudeGeometry 遇到互相重叠的内孔会直接吐出错误的剖分，所以孔之间必须留出间隙。
+ */
+function convexGap(a, b) {
+  let gap = -Infinity;
+  for (const poly of [a, b]) {
+    for (let i = 0; i < poly.length; i++) {
+      const p = poly[i];
+      const q = poly[(i + 1) % poly.length];
+      const nx = q.y - p.y;
+      const ny = p.x - q.x;
+      const len = Math.hypot(nx, ny) || 1;
+      const ux = nx / len;
+      const uy = ny / len;
+      let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
+      for (const v of a) { const t = v.x * ux + v.y * uy; if (t < a0) a0 = t; if (t > a1) a1 = t; }
+      for (const v of b) { const t = v.x * ux + v.y * uy; if (t < b0) b0 = t; if (t > b1) b1 = t; }
+      const g = Math.max(a0 - b1, b0 - a1);
+      if (g > gap) gap = g;
+    }
+  }
+  return gap;
+}
+
+/**
+ * 铸铁板上的开口：前弦床窗、中段左/右窗、尾部窗、两个 hand hole。
+ * 实体布局按真琴：前缘销列带、琴码所在横带、以及中缝与外周边缘保持实心，
+ * 开口只放在带与带之间。每个孔都先由 shrinkInside 缩进 platePts 内部，
+ * 再要求与其他孔至少留 20mm 间隙，保证 earcut 不会丢孔、也不会产生自交剖分。
+ * y 坐标与 outlinePoints 一致（越负越靠琴尾）。
+ */
+function buildPlateOpenings(platePts) {
+  const candidates = [
+    rectPts(0.14, 0.98, -0.150, -0.500, 0.024),   // 前弦床窗：让出琴销列与琴码，可直接看到击弦机/制音器
+    rectPts(0.12, 0.46, -0.640, -0.890, 0.022),   // 低音中段窗
+    rectPts(0.64, 0.88, -0.640, -0.890, 0.022),   // 高音中段窗
+    rectPts(0.32, 0.72, -1.020, -1.130, 0.020),   // 尾部窗
+    circlePts(0.55, -0.560, 0.030),               // hand hole（中缝实心带）
+    circlePts(0.55, -0.955, 0.030),               // hand hole（中缝实心带）
+  ];
+  const holes = [];
+  for (const pts of candidates) {
+    const fit = shrinkInside(pts, platePts, 0.012);
+    if (!fit || Math.abs(signedArea2(fit)) < 0.0012) continue;
+    if (holes.some((h) => convexGap(fit, h) < 0.020)) continue;
+    holes.push(fit);
+  }
+  return holes;
+}
+
+function box(w, h, d, material, radius = 0) {
+  const geo = radius > 0
+    ? new RoundedBoxGeometry(w, h, d, 2, Math.min(radius, Math.min(w, h, d) * 0.45))
+    : new THREE.BoxGeometry(w, h, d);
+  const mesh = new THREE.Mesh(geo, material);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+/**
+ * 琴码：底座 + 码桥，码桥顶面刚好托住弦面（而不是旧版那堵 10cm 高的方墙）。
+ * 沿 X 按 angle 斜置在 z 处。
+ */
+function buildBridge(z, length, angle, centerX, M) {
+  const capH = 0.012;
+  const capTop = STRING_Y - 0.0022;
+  const baseH = Math.max(0.010, capTop - capH - SOUND_TOP);
+  const g = new THREE.Group();
+  const base = box(length, baseH, 0.026, M.woodLight, 0.003);
+  base.position.y = SOUND_TOP + baseH / 2;
+  const cap = box(length, capH, 0.019, M.bridge, 0.002);
+  cap.position.y = SOUND_TOP + baseH + capH / 2;
+  g.add(base, cap);
+  // 码钉：弦跨过琴码时被这几根小铜钉压住。
+  const pinCount = Math.max(3, Math.round(length / 0.085));
+  const pins = new THREE.InstancedMesh(
+    new THREE.CylinderGeometry(0.0022, 0.0026, 0.014, 6), M.brass, pinCount,
+  );
+  for (let i = 0; i < pinCount; i++) {
+    const px = -length / 2 + length * (i + 0.5) / pinCount;
+    pins.setMatrixAt(i, new THREE.Matrix4().makeTranslation(px, capTop + 0.004, 0));
+  }
+  pins.instanceMatrix.needsUpdate = true;
+  g.add(pins);
+  g.position.set(centerX, 0, z);
+  g.rotation.y = angle;
+  return g;
+}
+
+function cylinderBetween(a, b, radius, material, segments = 8) {
+  const dir = new THREE.Vector3().subVectors(b, a);
+  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, dir.length(), segments), material);
+  mesh.position.copy(a).addScaledVector(dir, 0.5);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function orientInstancedCylinder(mesh, i, a, b, radius = 1) {
+  const dir = new THREE.Vector3().subVectors(b, a);
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+  const m = new THREE.Matrix4().compose(
+    a.clone().addScaledVector(dir, 0.5), q, new THREE.Vector3(radius, dir.length(), radius),
+  );
+  mesh.setMatrixAt(i, m);
+}
 
 export function buildPiano({ startMidi = 28, endMidi = 108 } = {}) {
   const M = createMaterials();
   const root = new THREE.Group();
+  root.name = 'GrandPiano_Rebuilt';
 
   const layout = computeKeyLayout(startMidi, endMidi);
-  const KW = layout.totalWidth;                 // 键盘宽度 ≈ 1.128m
-  const PAD = 0.05;                             // 琴身两侧颊木余量
-  const x0 = -PAD, x1 = KW + PAD;
-  const DEPTH = Math.max(1.55, KW * 1.42);      // 琴身纵深 ≈ 1.60m（修长）
+  const KW = layout.totalWidth;
   const cx = KW / 2;
+  const DEPTH = 1.42;
+  const outer = outlinePoints(KW, DEPTH);
+  const inner = insetPoints(outer);
 
-  // ---------------------------------------------------------------
-  // 1. 琴身外壳（环形壳体，前缘在 z=0，键盘向前探出）
-  // ---------------------------------------------------------------
-  const outerShape = buildBodyShape(x0, x1, DEPTH);
-  const outerPts = outerShape.getPoints(72);
-  const innerPts = offsetPolygon(outerPts, -RIM_WALL);
-  const innerPath = new THREE.Path();
-  innerPath.setFromPoints([...innerPts].reverse());
-  outerShape.holes.push(innerPath);
+  // 1) 分层琴身：底板 + 厚实外圈 + 顶部压边。没有重叠的异常偏移多边形。
+  const shell = new THREE.Mesh(ringGeometry(outer, inner, RIM_TOP), M.ebony);
+  shell.name = 'shell';
+  shell.castShadow = true; shell.receiveShadow = true;
+  root.add(shell);
 
-  const rim = new THREE.Mesh(extrudeUp(outerShape, RIM_H, 64), M.ebony);
-  rim.castShadow = true; rim.receiveShadow = true;
-  root.add(rim);
-
-  // 底板（封闭内腔底部）
-  const bottomShape = buildBodyShape(x0, x1, DEPTH);
-  const bottom = new THREE.Mesh(extrudeUp(bottomShape, 0.02, 48), M.ebonySat);
-  bottom.position.y = -0.02;
-  bottom.receiveShadow = true;
+  const bottom = new THREE.Mesh(extrudedPlanar(outer, 0.026, 0.002), M.ebonySat);
+  bottom.position.y = -0.026;
+  bottom.castShadow = true; bottom.receiveShadow = true;
   root.add(bottom);
 
-  // ---------------------------------------------------------------
-  // 2. 内框（音板周圈的抬高边框，特征性的「内框」）+ 音板 + 肋木
-  // ---------------------------------------------------------------
-  const innerPts2 = offsetPolygon(innerPts, -0.03);
-  const innerShape = new THREE.Shape(innerPts);
-  const innerShape2 = new THREE.Shape(innerPts2);
-  // 内框 = 环形壳体：innerPts 外沿 / innerPts2 内沿
-  const innerRingPath = new THREE.Path();
-  innerRingPath.setFromPoints([...innerPts2].reverse());
-  innerShape.holes.push(innerRingPath);
-  const innerRimWall = new THREE.Mesh(extrudeUp(innerShape, INNER_RIM_TOP - SB_Y, 56), M.innerRim);
-  innerRimWall.position.y = SB_Y;
-  innerRimWall.castShadow = true;
-  innerRimWall.receiveShadow = true;
-  root.add(innerRimWall);
+  // 内圈压边木条：贴在内壁顶口的一圈窄木条（现在才是真正的环，不再退化成封板）。
+  const lipInner = insetPoints(inner, 0.014);
+  const innerLip = new THREE.Mesh(ringGeometry(inner, lipInner, 0.018), M.woodLight);
+  innerLip.name = 'innerLip';
+  innerLip.position.y = RIM_TOP - 0.020;
+  innerLip.castShadow = true;
+  root.add(innerLip);
 
-  // 音板（内框内的实心面板）
-  const soundboard = new THREE.Mesh(extrudeUp(innerShape2, 0.008, 48), M.soundboard);
-  soundboard.position.y = SB_Y - 0.002;
+  // 音板：几乎铺满内腔（真琴音板是粘在 rim 内口上的）。
+  const soundboardPts = insetPoints(inner, 0.012);
+  const soundboard = new THREE.Mesh(extrudedPlanar(soundboardPts, 0.014, 0.001), M.soundboard);
+  soundboard.name = 'soundboard';
+  soundboard.position.y = SOUND_TOP - 0.014;
   soundboard.receiveShadow = true;
   root.add(soundboard);
 
-  // 肋木
-  const ribGeo = new THREE.BoxGeometry(1, 0.009, 0.016);
-  const ribs = new THREE.InstancedMesh(ribGeo, M.soundboard, 9);
-  const m4 = new THREE.Matrix4();
+  // 铸铁板：落在音板上方，带大型开口，透过开口能看到音板与肋木。
+  const platePts = insetPoints(soundboardPts, 0.026);
+  const plateHoles = buildPlateOpenings(platePts);
+  const plate = new THREE.Mesh(slabGeometry(platePts, plateHoles, 0.018), M.plate);
+  plate.name = 'plate';
+  plate.position.y = PLATE_TOP - 0.018;
+  plate.castShadow = true;
+  plate.receiveShadow = true;
+  root.add(plate);
+
+  // 铁板外缘的木色压条：明确显示铁板坐在音板之上、与 rim 之间留有木边。
+  const plateFramePts = insetPoints(platePts, 0.012);
+  const plateFrame = new THREE.Mesh(ringGeometry(platePts, plateFramePts, 0.006), M.woodLight);
+  plateFrame.name = 'plateFrame';
+  plateFrame.position.y = PLATE_TOP;
+  root.add(plateFrame);
+
+  // 音板肋木：在音板下侧（从下方才看得到，与真琴一致），右端逐根向内收缩以免穿出弯侧 rim。
   for (let i = 0; i < 9; i++) {
-    const d = DEPTH * (0.24 + i * 0.075);
-    const w = KW * (0.92 - Math.pow(Math.max(0, d / DEPTH - 0.55) / 0.45, 2) * 0.55);
-    m4.makeScale(w, 1, 1);
-    m4.setPosition(cx, SB_Y - 0.012, -d);
-    ribs.setMatrixAt(i, m4);
+    const z = -0.28 - i * 0.125;
+    let x0r = 0.02;
+    while (x0r < cx && !insidePoly(soundboardPts, x0r + 0.015, z)) x0r += 0.04;
+    let x1r = cx + KW * 0.45;
+    while (x1r > x0r + 0.1 && !insidePoly(soundboardPts, x1r - 0.015, z)) x1r -= 0.04;
+    if (x1r - x0r < 0.12) continue; // 尾部内腔过窄处不放肋木
+    const rib = box(x1r - x0r, 0.016, 0.018, M.woodLight, 0.003);
+    rib.position.set((x0r + x1r) / 2, SOUND_TOP - 0.014 - 0.008, z);
+    root.add(rib);
   }
-  ribs.instanceMatrix.needsUpdate = true;
-  root.add(ribs);
-
-  // ---------------------------------------------------------------
-  // 3. 铸铁框：金色整板铺满内腔（边缘露木音板）+ 纵横梁 + 弦枕
-  // ---------------------------------------------------------------
-  const plateGroup = new THREE.Group();
-  // 金色整板（内框轮廓向内缩 4.5cm，边缘露出木音板）
-  const plateOutline = offsetPolygon(innerPts2, -0.045);
-  const plateShape = new THREE.Shape(plateOutline);
-  const platePanel = new THREE.Mesh(extrudeUp(plateShape, 0.022, 56), M.plate);
-  platePanel.position.y = PLATE_Y - 0.011;
-  platePanel.castShadow = true;
-  plateGroup.add(platePanel);
-
-  // 纵向梁（跨过板面，五条斜向支撑）
-  const frontZ = -0.10, backZ = -DEPTH * 0.93;
-  for (let i = 0; i < 5; i++) {
-    const t = i / 4;
-    const sx = lerp(x0 + 0.10, x1 - 0.10, t);
-    const ex = lerp(x0 + 0.18, x1 - 0.30, t);
-    const len = Math.abs(backZ - frontZ);
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.030, 0.020, len), M.plate);
-    const midX = (sx + ex) / 2, midZ = (frontZ + backZ) / 2;
-    bar.position.set(midX, PLATE_Y + 0.008, midZ);
-    bar.rotation.y = Math.atan2(ex - sx, backZ - frontZ);
-    bar.castShadow = true;
-    plateGroup.add(bar);
+  const bridgeA = buildBridge(BRIDGE_TREBLE_Z, KW * 0.72, -0.10, cx, M);
+  root.add(bridgeA);
+  let bbW = KW * 0.50;
+  while (bbW > 0.2) {
+    const hx = (bbW / 2) * Math.cos(0.14);
+    const hz = (bbW / 2) * Math.sin(0.14);
+    if (insidePoly(soundboardPts, cx - KW * 0.12 + hx, BRIDGE_BASS_Z - hz)
+      && insidePoly(soundboardPts, cx - KW * 0.12 - hx, BRIDGE_BASS_Z + hz)) break;
+    bbW -= 0.04;
   }
-  // 横向梁
-  for (const [z, w] of [[-0.26, KW * 0.94], [-DEPTH * 0.62, KW * 0.78], [-DEPTH * 0.90, KW * 0.46]]) {
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(w, 0.018, 0.026), M.plate);
-    bar.position.set(cx, PLATE_Y + 0.008, z);
-    bar.castShadow = true;
-    plateGroup.add(bar);
+  const bridgeB = buildBridge(BRIDGE_BASS_Z, bbW, 0.14, cx - KW * 0.12, M);
+  root.add(bridgeB);
+
+  // 铁板横肋（casting ribs）：沿 X 跨在开口上的铸接肋条，位置错开琴码与 hand hole。
+  for (const [z, w] of [[-0.235, 0.022], [-0.620, 0.022], [-1.180, 0.016]]) {
+    let x0b = 0.06;
+    while (x0b < cx && !insidePoly(platePts, x0b, z)) x0b += 0.03;
+    let x1b = cx + KW * 0.46;
+    while (x1b > x0b + 0.1 && !insidePoly(platePts, x1b, z)) x1b -= 0.03;
+    if (x1b - x0b < 0.14) continue;
+    const beam = box(x1b - x0b, 0.022, w, M.plate, 0.004);
+    beam.position.set((x0b + x1b) / 2, PLATE_TOP + 0.011, z);
+    beam.castShadow = true;
+    root.add(beam);
   }
-  // 弦枕（前）与挂弦钉板（后）
-  const agraffe = new THREE.Mesh(new THREE.BoxGeometry(KW * 0.94, 0.028, 0.03), M.plate);
-  agraffe.position.set(cx, PLATE_Y + 0.014, -0.11);
-  agraffe.castShadow = true;
-  plateGroup.add(agraffe);
-  // 挂弦钉板（低音侧直边附近）
-  const hitch = new THREE.Mesh(new THREE.BoxGeometry(0.048, 0.026, DEPTH * 0.7), M.plate);
-  hitch.position.set(x0 + 0.11, PLATE_Y + 0.010, -DEPTH * 0.42);
-  hitch.rotation.y = 0.03;
-  plateGroup.add(hitch);
-  root.add(plateGroup);
 
-  // 内腔补光：照亮琴弦/铸铁框/音板，避免内腔发黑
-  const interiorLight = new THREE.PointLight(0xffe8c8, 20, 3.6, 1.7);
-  interiorLight.position.set(cx, 0.42, -DEPTH * 0.5);
-  root.add(interiorLight);
-
-  // ---------------------------------------------------------------
-  // 4. 琴弦（低音铜缠弦 / 高音钢弦，含同音弦组）—— 位于键盘上方
-  // ---------------------------------------------------------------
+  // 2) 琴弦、调律钉、挂弦钉。所有端点都限制在铁板内。
+  //    弦径/同音间距必须按真琴量级：旧版弦径 3.6~9.6mm 却只隔 4.5mm，相邻弦互相穿插，
+  //    从上方看下去整片弦床糊成一块实心白板，反而看不出“内构”。
   const stringDefs = [];
+  const sx0 = 0.088;
   for (const k of layout.keys) {
-    const f = midiToFreq(k.midi);
     const t = (k.midi - startMidi) / Math.max(1, endMidi - startMidi);
-    const copper = k.midi < 52;
+    const f = 440 * Math.pow(2, (k.midi - 69) / 12);
+    const low = k.midi < 52;
     const count = k.midi < 36 ? 2 : (k.midi < 60 ? 2 : 3);
-    const len = Math.min(DEPTH * 0.90, Math.max(0.30, 1.22 * Math.pow(440 / f, 0.42)));
-    const radius = Math.max(0.0016, Math.min(0.0048, 0.0048 * Math.pow(440 / f, 0.33)));
+    const len = Math.min(1.30, Math.max(0.34, 1.18 * Math.pow(440 / f, 0.43)));
+    const radius = k.midi < 44 ? 0.0026 : (k.midi < 52 ? 0.0021 : (k.midi < 64 ? 0.0015 : (k.midi < 76 ? 0.0012 : 0.0010)));
+    // 同音间距必须同时满足：大于弦径（不互相穿插）、又小于半音间距（不挤占相邻音）。
+    // 本琴平均每半音只占 14.1mm，三弦组的总宽必须控制在 10mm 以内。
+    const unison = k.midi < 44 ? 0.0100 : (k.midi < 60 ? 0.0070 : 0.0045);
     for (let u = 0; u < count; u++) {
-      const off = (u - (count - 1) / 2) * 0.0055;
-      stringDefs.push({
-        copper, radius,
-        x1: 0.055 + t * (KW - 0.11) + off,
-        z1: -0.07,
-        x2: 0.055 + t * (KW - 0.11) + off + (1 - t) * 0.07,
-        z2: -0.07 - len,
-      });
+      const off = (u - (count - 1) / 2) * unison;
+      let x1 = sx0 + t * (KW - sx0 * 2) + off + (low ? (52 - k.midi) * 0.0018 : 0);
+      const z1 = -0.12 - (low ? 0.02 : 0);
+      while (x1 > 0.1 && !insidePoly(platePts, x1, z1)) x1 -= 0.02;
+      let x2 = low ? Math.max(0.07, x1 - 0.11) : x1;
+      let z2 = Math.max(-1.30, -0.12 - len);
+      // 翼形尾部使铁板边界向左收窄，低音弦后端要同时向内绕才能落在板上。
+      while (z2 < -0.25 && !insidePoly(platePts, x2, z2)) {
+        z2 += 0.03;
+        if (low) x2 += 0.012;
+      }
+      stringDefs.push({ midi: k.midi, x1, x2, radius, copper: low, z1, z2 });
     }
   }
-  const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true);
-  const copperCount = stringDefs.filter((s) => s.copper).length;
-  const steelCount = stringDefs.length - copperCount;
-  const copperMesh = new THREE.InstancedMesh(cylGeo, M.copper, copperCount);
-  const steelMesh = new THREE.InstancedMesh(cylGeo, M.steel, steelCount);
-  const q = new THREE.Quaternion();
-  const up = new THREE.Vector3(0, 1, 0);
-  const pa = new THREE.Vector3(), pb = new THREE.Vector3(), dir = new THREE.Vector3();
-  const sc = new THREE.Vector3();
-  let ci = 0, si = 0;
-  for (const s of stringDefs) {
-    pa.set(s.x1, STRING_Y, s.z1);
-    pb.set(s.x2, STRING_Y, s.z2);
-    dir.subVectors(pb, pa);
-    const len = dir.length();
-    q.setFromUnitVectors(up, dir.clone().normalize());
-    sc.set(s.radius, len, s.radius);
-    m4.compose(pa.clone().addScaledVector(dir, 0.5), q, sc);
-    if (s.copper) copperMesh.setMatrixAt(ci++, m4);
-    else steelMesh.setMatrixAt(si++, m4);
+  const stringGeo = new THREE.CylinderGeometry(1, 1, 1, 8, 1, true);
+  const copperDefs = stringDefs.filter((s) => s.copper);
+  const steelDefs = stringDefs.filter((s) => !s.copper);
+  const copperStrings = new THREE.InstancedMesh(stringGeo, M.copper, copperDefs.length);
+  const steelStrings = new THREE.InstancedMesh(stringGeo, M.steel, steelDefs.length);
+  for (const [mesh, defs] of [[copperStrings, copperDefs], [steelStrings, steelDefs]]) {
+    defs.forEach((s, i) => orientInstancedCylinder(mesh, i,
+      new THREE.Vector3(s.x1, STRING_Y, s.z1), new THREE.Vector3(s.x2, STRING_Y, s.z2), s.radius));
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.castShadow = true;
   }
-  copperMesh.instanceMatrix.needsUpdate = true;
-  steelMesh.instanceMatrix.needsUpdate = true;
-  root.add(copperMesh, steelMesh);
+  root.add(copperStrings, steelStrings);
 
-  // ---------------------------------------------------------------
-  // 5. 制音器（随按键抬起，可动）
-  // ---------------------------------------------------------------
-  const DAMPER_Y = STRING_Y + 0.012;
-  const damperDefs = [];
-  for (const k of layout.keys) {
-    const t = (k.midi - startMidi) / Math.max(1, endMidi - startMidi);
-    damperDefs.push({
-      midi: k.midi,
-      x: 0.055 + t * (KW - 0.11),
-      z: -0.13 - t * DEPTH * 0.10,
-      lifted: false,
-    });
-  }
-  const damperGeo = new THREE.BoxGeometry(0.011, 0.022, 0.032);
-  const dampers = new THREE.InstancedMesh(damperGeo, M.feltDark, damperDefs.length);
-  const damperIndex = new Map();
-  damperDefs.forEach((d, i) => {
-    damperIndex.set(d.midi, i);
-    m4.makeTranslation(d.x, DAMPER_Y, d.z);
-    dampers.setMatrixAt(i, m4);
+  const tuningPins = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.002, 0.0022, 0.028, 8), M.brass, stringDefs.length);
+  const hitchPins = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.0018, 0.002, 0.024, 8), M.brass, stringDefs.length);
+  stringDefs.forEach((s, i) => {
+    tuningPins.setMatrixAt(i, new THREE.Matrix4().makeTranslation(s.x1, PLATE_TOP + 0.022, s.z1));
+    hitchPins.setMatrixAt(i, new THREE.Matrix4().makeTranslation(s.x2, PLATE_TOP + 0.020, s.z2));
   });
-  dampers.instanceMatrix.needsUpdate = true;
-  dampers.castShadow = true;
-  root.add(dampers);
+  tuningPins.instanceMatrix.needsUpdate = true; hitchPins.instanceMatrix.needsUpdate = true;
+  root.add(tuningPins, hitchPins);
 
-  // ---------------------------------------------------------------
-  // 6. 击弦机舱 + 键盘区域 + 前板 + 颊木 + 挡板 + 铭牌 + 谱架
-  // ---------------------------------------------------------------
-  // 击弦机舱（填满琴弦与键盘之间的空间）
-  const actionBay = new THREE.Mesh(new THREE.BoxGeometry(KW * 0.96, 0.10, 0.20), M.ebonySat);
-  actionBay.position.set(cx, 0.25, -0.16);
-  actionBay.castShadow = true;
+  // 3) 击弦机：槌柄轨道、槌头和动作舱。
+  const hammerRailY = 0.292;
+  const hammerRailZ = -0.105;
+  const hammerLen = 0.108;
+  const hammerRest = { y: 0.342, z: -0.178 };
+  const hammerHit = { y: 0.389, z: -0.105 };
+  const hammerGeo = new RoundedBoxGeometry(0.014, hammerLen, 0.018, 2, 0.0022);
+  hammerGeo.translate(0, hammerLen / 2, 0);
+  const hammers = new THREE.InstancedMesh(hammerGeo, M.feltWhite, layout.keys.length);
+  const restAngle = Math.atan2(hammerRest.z - hammerRailZ, hammerRest.y - hammerRailY);
+  const hitAngle = Math.atan2(hammerHit.z - hammerRailZ, hammerHit.y - hammerRailY);
+  const maxHammerAngle = hitAngle - restAngle;
+  const hammerQ = new THREE.Quaternion();
+  const hammerM = new THREE.Matrix4();
+  function refreshHammers(presses) {
+    layout.keys.forEach((k, i) => {
+      hammerQ.setFromAxisAngle(new THREE.Vector3(1, 0, 0), restAngle + (presses[i] || 0) * maxHammerAngle);
+      hammerM.compose(new THREE.Vector3(k.centerX, hammerRailY, hammerRailZ), hammerQ, new THREE.Vector3(1, 1, 1));
+      hammers.setMatrixAt(i, hammerM);
+    });
+    hammers.instanceMatrix.needsUpdate = true;
+  }
+  const pressArr = new Array(layout.keys.length).fill(0);
+  refreshHammers(pressArr);
+  hammers.castShadow = true;
+  root.add(hammers);
+
+  const actionBay = box(KW * 0.96, 0.10, 0.22, M.ebonySat, 0.008);
+  actionBay.position.set(cx, 0.208, -0.14);
   root.add(actionBay);
+  const rail = box(KW * 0.94, 0.014, 0.030, M.ebonySat, 0.004);
+  rail.position.set(cx, hammerRailY - 0.006, hammerRailZ);
+  root.add(rail);
 
-  // 键盘托（键下木托）
-  const keyBed = new THREE.Mesh(new THREE.BoxGeometry(KW + PAD * 2, 0.03, 0.22), M.ebonySat);
-  keyBed.position.set(cx, 0.183, 0.075);
-  keyBed.receiveShadow = true; keyBed.castShadow = true;
+  // 4) 制音器：每个键一组制音头和制音杆，严格跟随踏板抬升。
+  const damperHeadGeo = new RoundedBoxGeometry(0.012, 0.022, 0.030, 2, 0.002);
+  const dampers = new THREE.InstancedMesh(damperHeadGeo, M.feltDark, layout.keys.length);
+  const damperLeverGeo = new THREE.CylinderGeometry(0.0017, 0.0017, 1, 6);
+  const damperLevers = new THREE.InstancedMesh(damperLeverGeo, M.ebonySat, layout.keys.length);
+  const damperDefs = layout.keys.map((k) => {
+    let x = sx0 + ((k.midi - startMidi) / Math.max(1, endMidi - startMidi)) * (KW - sx0 * 2);
+    while (x > 0.1 && !insidePoly(platePts, x, -0.30)) x -= 0.02;
+    return { midi: k.midi, x, lifted: false };
+  });
+  const damperIndex = new Map(damperDefs.map((d, i) => [d.midi, i]));
+  function refreshDampers() {
+    damperDefs.forEach((d, i) => {
+      // 制音头毡面坐在弦面之上（而不是穿进弦床），抬起时整体升高。
+      const y = STRING_Y + 0.008 + (d.lifted ? 0.026 : 0);
+      dampers.setMatrixAt(i, new THREE.Matrix4().makeTranslation(d.x, y, -0.30));
+      const a = new THREE.Vector3(d.x, 0.215, -0.04);
+      const b = new THREE.Vector3(d.x, y - 0.011, -0.30);
+      orientInstancedCylinder(damperLevers, i, a, b);
+    });
+    dampers.instanceMatrix.needsUpdate = true;
+    damperLevers.instanceMatrix.needsUpdate = true;
+  }
+  refreshDampers();
+  dampers.castShadow = true;
+  root.add(dampers, damperLevers);
+
+  // 5) 键盘和键后结构。所有键独立 pivot，黑键底面放在白键顶面，不相互穿插。
+  const PAD = 0.048;
+  const keyBed = box(KW + PAD * 2, 0.024, 0.18, M.ebonySat, 0.004);
+  keyBed.position.set(cx, 0.186, 0.060);
   root.add(keyBed);
+  const frontRail = box(KW + PAD * 2, 0.050, 0.020, M.ebony, 0.004);
+  frontRail.position.set(cx, 0.174, 0.162);
+  root.add(frontRail);
+  const frontFelt = box(KW, 0.006, 0.010, M.felt, 0.002);
+  frontFelt.position.set(cx, 0.198, 0.147);
+  root.add(frontFelt);
+  const backFelt = box(KW, 0.006, 0.010, M.felt, 0.002);
+  backFelt.position.set(cx, 0.198, -0.002);
+  root.add(backFelt);
+  const fallboard = box(KW, 0.17, 0.024, M.ebony, 0.004);
+  fallboard.position.set(cx, 0.286, -0.020);
+  root.add(fallboard);
 
-  // 正面踢脚板（键盘下方的低矮前板，让琴键露出来）
-  const keySlip = new THREE.Mesh(new THREE.BoxGeometry(KW + PAD * 2, 0.13, 0.02), M.ebony);
-  keySlip.position.set(cx, 0.125, 0.16);
-  keySlip.castShadow = true;
-  root.add(keySlip);
+  // 参考图中的谱架：拱顶圆角面板、顶端背离演奏者倾斜、底部托条。
+  const deskW = KW * 0.62;
+  const deskH = 0.22;
+  const deskShape = new THREE.Shape();
+  deskShape.moveTo(-deskW / 2, -0.105);
+  deskShape.lineTo(-deskW / 2, deskH - 0.055);
+  deskShape.quadraticCurveTo(-deskW / 2, deskH - 0.014, -deskW / 2 + 0.06, deskH - 0.008);
+  deskShape.quadraticCurveTo(0, deskH + 0.016, deskW / 2 - 0.06, deskH - 0.008);
+  deskShape.quadraticCurveTo(deskW / 2, deskH - 0.014, deskW / 2, deskH - 0.055);
+  deskShape.lineTo(deskW / 2, -0.105);
+  deskShape.closePath();
+  const desk = new THREE.Group();
+  const deskPanel = new THREE.Mesh(new THREE.ExtrudeGeometry(deskShape, {
+    depth: 0.016, bevelEnabled: true, bevelThickness: 0.003, bevelSize: 0.003, bevelSegments: 2, curveSegments: 10,
+  }), M.ebony);
+  deskPanel.castShadow = true; deskPanel.receiveShadow = true;
+  const deskLip = box(deskW * 1.06, 0.016, 0.052, M.ebonySat, 0.003);
+  deskLip.position.set(0, 0.020, 0.030);
+  desk.add(deskPanel, deskLip);
+  desk.position.set(cx, 0.360, -0.105);
+  desk.rotation.x = -0.16;
+  root.add(desk);
+  // 键盖与谱架之间的暗色键井盖板，遮住音板前缘。
+  const keywell = box(deskW * 1.02, 0.030, 0.10, M.ebonySat, 0.004);
+  keywell.position.set(cx, 0.315, -0.075);
+  root.add(keywell);
+  // 谱架两侧的平盖板（键盖顶线与 rim 内壁之间，参考图正/透视图中的方块）。
+  const innerL = cx + (outer[0].x - cx) * 0.925;
+  const innerR = cx + (outer[1].x - cx) * 0.925;
+  for (const [edgeFrom, edgeTo] of [[innerL + 0.012, cx - deskW / 2], [cx + deskW / 2, innerR - 0.012]]) {
+    const w = edgeTo - edgeFrom;
+    if (w <= 0.02) continue;
+    const shoulder = box(w, 0.07, 0.07, M.ebonySat, 0.006);
+    shoulder.position.set((edgeFrom + edgeTo) / 2, 0.365, -0.08);
+    root.add(shoulder);
+  }
 
-  // 键前红呢条（前档呢）
-  const feltStrip = new THREE.Mesh(new THREE.BoxGeometry(KW, 0.006, 0.008), M.felt);
-  feltStrip.position.set(cx, 0.195, 0.15);
-  root.add(feltStrip);
-
-  // 颊木（键盘两侧）
-  for (const sx of [x0 + PAD / 2, x1 - PAD / 2]) {
-    const cheek = new THREE.Mesh(new THREE.BoxGeometry(PAD, 0.18, 0.16), M.ebony);
-    cheek.position.set(sx, 0.26, 0.06);
-    cheek.castShadow = true;
+  for (const x of [-PAD / 2, KW + PAD / 2]) {
+    const cheek = box(PAD, 0.11, 0.18, M.ebony, 0.006);
+    cheek.position.set(x, 0.235, 0.058);
     root.add(cheek);
   }
 
-  // 键后挡板（fallboard，降矮让内构从演奏位可见）
-  const fallboard = new THREE.Mesh(new THREE.BoxGeometry(KW, 0.14, 0.02), M.ebony);
-  fallboard.position.set(cx, 0.26, -0.02);
-  fallboard.castShadow = true;
-  root.add(fallboard);
-
-  // 击弦机槌头（白呢，位于琴弦前方/挡板之后，倾斜指向琴弦）
-  const hammerRail = new THREE.Mesh(new THREE.BoxGeometry(KW * 0.92, 0.016, 0.02), M.ebonySat);
-  hammerRail.position.set(cx, 0.315, -0.085);
-  root.add(hammerRail);
-  const hammerGeo = new THREE.BoxGeometry(0.007, 0.017, 0.021);
-  const hammerQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.75);
-  const hammerScale = new THREE.Vector3(1, 1, 1);
-  const hammerP = new THREE.Vector3();
-  const hammers = new THREE.InstancedMesh(hammerGeo, M.feltWhite, layout.keys.length);
-  for (let i = 0; i < layout.keys.length; i++) {
-    const kk = layout.keys[i];
-    hammerP.set(kk.centerX, 0.328, kk.isBlack ? -0.072 : -0.080);
-    m4.compose(hammerP, hammerQuat, hammerScale);
-    hammers.setMatrixAt(i, m4);
-  }
-  hammers.instanceMatrix.needsUpdate = true;
-  root.add(hammers);
-
-  // 金色铭牌（贴在挡板正前方，面向演奏者）
-  const nameTex = nameBoardTexture();
-  const namePlane = new THREE.Mesh(
-    new THREE.PlaneGeometry(KW * 0.72, 0.09),
-    new THREE.MeshBasicMaterial({ map: nameTex }),
-  );
-  namePlane.position.set(cx, 0.265, -0.004);
-  root.add(namePlane);
-
-  // 谱架
-  const desk = new THREE.Group();
-  const deskPanel = new THREE.Mesh(new THREE.BoxGeometry(KW * 0.80, 0.16, 0.014), M.ebony);
-  deskPanel.position.set(0, 0.09, 0);
-  deskPanel.castShadow = true;
-  const deskLip = new THREE.Mesh(new THREE.BoxGeometry(KW * 0.80, 0.016, 0.028), M.ebony);
-  deskLip.position.set(0, 0.006, 0.016);
-  desk.add(deskPanel, deskLip);
-  desk.position.set(cx, 0.37, -0.10);
-  desk.rotation.x = 0.28;
-  root.add(desk);
-
-  // ---------------------------------------------------------------
-  // 7. 琴键（81 键，可按下；键盘向前探出琴身）
-  // ---------------------------------------------------------------
   const keys = new Map();
   const keyMeshes = [];
-  const wSample = layout.keys.find((k) => !k.isBlack);
-  const bSample = layout.keys.find((k) => k.isBlack);
-  const whiteGeo = new RoundedBoxGeometry(wSample.width, KEY_H, wSample.length, 2, 0.0015);
-  const blackGeo = taperedBoxGeometry(bSample.width, BLACK_H, bSample.length, 9.8 / 13.7, 0.90);
-
-  for (const k of layout.keys) {
+  const whiteSample = layout.keys.find((k) => !k.isBlack);
+  const blackSample = layout.keys.find((k) => k.isBlack);
+  const whiteGeo = new RoundedBoxGeometry(whiteSample.width, KEY_H, whiteSample.length, 2, 0.0022);
+  const blackGeo = new RoundedBoxGeometry(blackSample.width, BLACK_H, blackSample.length, 2, 0.0022);
+  layout.keys.forEach((k, i) => {
     const isBlack = k.isBlack;
-    const backZ = isBlack ? 0.002 : 0;
-    const len = k.length;
-
+    const backZ = isBlack ? 0.002 : KEY_BACK_Z;
+    const frontZ = backZ + k.length;
+    const pivotY = KEY_TOP - KEY_H;
     const pivot = new THREE.Group();
-    pivot.position.set(k.centerX, 0, backZ);
-
+    pivot.position.set(k.centerX, pivotY, BALANCE_Z);
     const mat = (isBlack ? M.blackKey : M.whiteKey).clone();
     mat.emissive = new THREE.Color(0x000000);
-
     const mesh = new THREE.Mesh(isBlack ? blackGeo : whiteGeo, mat);
-    const topY = isBlack ? WHITE_TOP + BLACK_RISE : WHITE_TOP;
-    mesh.position.set(0, topY - (isBlack ? BLACK_H / 2 : KEY_H / 2), len / 2);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
+    mesh.position.set(0, isBlack ? KEY_H + BLACK_H / 2 : KEY_H / 2,
+      (backZ + frontZ) / 2 - BALANCE_Z);
+    mesh.castShadow = true; mesh.receiveShadow = true;
     mesh.userData.midi = k.midi;
     pivot.add(mesh);
     root.add(pivot);
-
-    const keyObj = {
-      midi: k.midi, isBlack, pivot, mesh, material: mat,
-      length: len, backZ, frontZ: backZ + len, centerX: k.centerX, topY,
-      press: 0, target: 0,
-      maxAngle: Math.asin(KEY_DIP / len),
-    };
-    keys.set(k.midi, keyObj);
     keyMeshes.push(mesh);
-  }
+    keys.set(k.midi, {
+      midi: k.midi, isBlack, pivot, mesh, material: mat,
+      length: k.length, backZ, frontZ, centerX: k.centerX,
+      topY: isBlack ? KEY_TOP + BLACK_H : KEY_TOP,
+      pivotY, pivotZ: BALANCE_Z,
+      press: 0, target: 0,
+      maxAngle: Math.asin(0.010 / Math.max(0.001, frontZ - BALANCE_Z)),
+    });
+  });
 
-  // ---------------------------------------------------------------
-  // 8. 顶盖（可开合）+ 支撑杆
-  // ---------------------------------------------------------------
-  const lidShape = buildBodyShape(x0 - 0.006, x1 + 0.006, DEPTH + 0.006);
-  const lidGeo = extrudeUp(lidShape, 0.026, 56);
-  const LID_HINGE_X = x0 + 0.02;
+  // 6) 琴盖：铰链沿琴身左侧直边（spine），绕前后轴侧向开合，与参考图正视图/透视图一致。
+  const hingeX = outer[0].x + 0.012;
   const lidPivot = new THREE.Group();
-  lidPivot.position.set(LID_HINGE_X, RIM_H + 0.012, 0);
-  const lidMesh = new THREE.Mesh(lidGeo, M.ebony);
-  lidMesh.position.x = -LID_HINGE_X;
-  lidMesh.castShadow = true;
-  lidMesh.receiveShadow = true;
-  lidPivot.add(lidMesh);
+  lidPivot.position.set(hingeX, RIM_TOP + 0.010, 0);
+  // 琴盖不再是矩形盒，而是沿琴身翼形轮廓制作的薄板，闭合时完整覆盖琴身。
+  const lidLocalPts = outer.map((p) => new THREE.Vector2(p.x - hingeX, p.y));
+  const lidGeo = extrudedPlanar(lidLocalPts, 0.026, 0.0025);
+  const lid = new THREE.Mesh(lidGeo, M.ebony);
+  lid.name = 'lid';
+  lid.position.y = -0.026;
+  lid.castShadow = true;
+  lid.receiveShadow = true;
+  lidPivot.add(lid);
+  const lc = lidLocalPts.reduce((acc, p) => acc.add(p), new THREE.Vector2())
+    .multiplyScalar(1 / lidLocalPts.length);
+  const lidEdge = new THREE.Mesh(ringGeometry(
+    lidLocalPts,
+    lidLocalPts.map((p) => new THREE.Vector2(lc.x + (p.x - lc.x) * 0.975, lc.y + (p.y - lc.y) * 0.975)),
+    0.006,
+  ), M.ebonySat);
+  lidEdge.position.y = -0.006;
+  lidPivot.add(lidEdge);
   root.add(lidPivot);
-
-  const propGeo = new THREE.CylinderGeometry(0.008, 0.008, 1, 10);
-  const prop = new THREE.Mesh(propGeo, M.brass);
-  prop.castShadow = true;
+  const hinge = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, DEPTH * 0.58, 12), M.brass);
+  hinge.rotation.x = Math.PI / 2;
+  hinge.position.set(hingeX + 0.010, RIM_TOP + 0.008, -0.48);
+  root.add(hinge);
+  const prop = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 1, 10), M.brass);
   root.add(prop);
-
-  const LID_MAX = 1.35;   // 琴盖最大开度（≈77°，近乎竖直，不遮挡内腔）
+  const propBase = new THREE.Vector3(KW * 0.975, RIM_TOP + 0.002, -0.66);
   let lidProgress = 1;
-  const propBase = new THREE.Vector3(KW * 0.80, RIM_H + 0.002, -DEPTH * 0.30);
-  const propLocal = new THREE.Vector3(KW * 0.80 - LID_HINGE_X, 0, -DEPTH * 0.30);
-
-  function updateLid(p) {
-    lidProgress = p;
-    const angle = LID_MAX * p;
+  function updateLid(progress) {
+    lidProgress = THREE.MathUtils.clamp(progress, 0, 1);
+    // 开度越大，琴盖在水平面的投影越短，露出的内腔越多。
+    // 上限受真实尺度约束：撑杆开到 0.75rad 时盖头高度约 1.28m，整体刚好不超 1.8m。
+    const angle = lidProgress * 0.75;
     lidPivot.rotation.z = angle;
-    prop.visible = p > 0.05;
+    prop.visible = lidProgress > 0.05;
     if (prop.visible) {
-      const top = propLocal.clone();
-      top.applyAxisAngle(new THREE.Vector3(0, 0, 1), angle);
-      top.add(lidPivot.position);
-      orientCylinder(prop, propBase, top);
+      // 撑杆顶端顶在琴盖底面，底端立在弯侧 rim 顶面。
+      const lx = KW * 0.60;
+      const top = new THREE.Vector3(
+        hingeX + lx * Math.cos(angle) + 0.026 * Math.sin(angle),
+        RIM_TOP + 0.010 + lx * Math.sin(angle) - 0.026 * Math.cos(angle),
+        propBase.z,
+      );
+      prop.position.copy(propBase).add(top).multiplyScalar(0.5);
+      prop.scale.set(1, propBase.distanceTo(top), 1);
+      prop.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), top.clone().sub(propBase).normalize());
     }
   }
   updateLid(1);
 
-  // ---------------------------------------------------------------
-  // 9. 琴腿 / 脚轮 / 踏板架 / 琴凳
-  // ---------------------------------------------------------------
-  const legH = -FLOOR_Y;
-  const legPositions = [
-    [x0 + 0.08, 0.02], [x1 - 0.08, 0.02], [KW * 0.30, -DEPTH * 0.84],
-  ];
-  for (const [lx, lz] of legPositions) {
-    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.038, 0.052, legH, 20), M.ebony);
-    leg.position.set(lx, FLOOR_Y + legH / 2, lz);
+  // 7) 琴腿、琴架、三踏板和动态连杆。
+  // 参考图琴腿：方形锥腿 + 顶部安装块 + 踝块 + 带轮黄铜脚轮。
+  [[0.08, -0.02], [KW - 0.08, -0.02], [KW * 0.31, -1.16]].forEach(([x, z]) => {
+    const topY = 0.02;
+    const ankleTop = FLOOR_Y + 0.115;
+    const cap = box(0.115, 0.075, 0.115, M.ebony, 0.010);
+    cap.position.set(x, topY - 0.030, z);
+    root.add(cap);
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.070, 0.042, topY - ankleTop, 4, 1), M.ebony);
+    leg.rotation.y = Math.PI / 4;
+    leg.position.set(x, (topY + ankleTop) / 2, z);
     leg.castShadow = true;
     root.add(leg);
-    const caster = new THREE.Mesh(new THREE.CylinderGeometry(0.030, 0.030, 0.024, 16), M.brass);
-    caster.position.set(lx, FLOOR_Y + 0.012, lz);
-    root.add(caster);
-  }
-
-  // 踏板架（lyre）：立柱 + 底座 + 三块踏板（位于琴身正面、键盘下方可见处）
-  const lyreX = cx - 0.02, lyreZ = 0.10;
-  const postTop = -0.06, postBottom = FLOOR_Y + 0.03;
-  const post = new THREE.Mesh(new THREE.BoxGeometry(0.042, postTop - postBottom, 0.042), M.ebony);
-  post.position.set(lyreX, (postTop + postBottom) / 2, lyreZ);
-  post.castShadow = true;
-  root.add(post);
-  const lyreBase = new THREE.Mesh(new THREE.BoxGeometry(0.27, 0.03, 0.17), M.ebony);
-  lyreBase.position.set(lyreX, FLOOR_Y + 0.015, lyreZ - 0.02);
-  lyreBase.castShadow = true;
-  root.add(lyreBase);
-
-  const pedals = [];
-  [-0.078, 0, 0.078].forEach((dx, i) => {
-    const p = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.012, 0.082), M.brass);
-    p.position.set(lyreX + dx, FLOOR_Y + 0.052, lyreZ + 0.03);
-    p.castShadow = true;
-    root.add(p);
-    pedals.push({ mesh: p, baseY: p.position.y, press: 0, target: 0 });
+    const ankle = box(0.068, 0.055, 0.068, M.ebony, 0.008);
+    ankle.position.set(x, ankleTop - 0.0225, z);
+    root.add(ankle);
+    const fork = new THREE.Mesh(new THREE.CylinderGeometry(0.020, 0.024, 0.045, 10), M.brass);
+    fork.position.set(x, FLOOR_Y + 0.048, z);
+    root.add(fork);
+    const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.026, 0.016, 16), M.brass);
+    wheel.rotation.z = Math.PI / 2;
+    wheel.position.set(x, FLOOR_Y + 0.026, z);
+    wheel.castShadow = true;
+    root.add(wheel);
   });
 
-  // 琴凳
+  const lyreX = cx;
+  const lyreZ = 0.12;
+  const lyreBoxTop = -0.14;
+  const lyreBoxBottom = -0.30;
+  // 参考图琴架：多根竖板条组成 lyre 柱 + 悬空踏板盒 + 后方斜撑杆。
+  for (const dx of [-0.054, -0.018, 0.018, 0.054]) {
+    const post = box(0.020, -0.02 - lyreBoxTop, 0.030, M.ebony, 0.004);
+    post.position.set(lyreX + dx, (lyreBoxTop - 0.02) / 2, lyreZ);
+    root.add(post);
+  }
+  const lyreBase = box(0.21, lyreBoxTop - lyreBoxBottom, 0.14, M.ebony, 0.008);
+  lyreBase.position.set(lyreX, (lyreBoxTop + lyreBoxBottom) / 2, lyreZ - 0.02);
+  root.add(lyreBase);
+  for (const dx of [-0.07, 0.07]) {
+    root.add(cylinderBetween(
+      new THREE.Vector3(lyreX + dx, lyreBoxTop - 0.02, lyreZ - 0.06),
+      new THREE.Vector3(lyreX + dx * 1.9, -0.02, lyreZ - 0.25),
+      0.013, M.ebonySat, 8,
+    ));
+  }
+
+  const pedals = [];
+  const pedalMeshes = [];
+  const pedalGroup = new THREE.Group();
+  const pedalDepth = 0.105;
+  const pedalWidth = 0.030;
+  const pedalPivotZ = lyreZ + 0.05;
+  [-0.045, 0, 0.045].forEach((dx, i) => {
+    const pivot = new THREE.Group();
+    pivot.position.set(lyreX + dx, lyreBoxTop - 0.035, pedalPivotZ);
+    const pedal = box(pedalWidth, 0.014, pedalDepth, M.brass, 0.004);
+    pedal.position.z = pedalDepth / 2;
+    pedal.userData.pedalIndex = i;
+    pivot.add(pedal);
+    pedalGroup.add(pivot);
+    pedals.push({ pivot, target: 0, press: 0 });
+    pedalMeshes.push(pedal);
+  });
+  root.add(pedalGroup);
+
+  const rods = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.0034, 0.0034, 1, 6), M.brass, 3);
+  const rodBase = new THREE.Vector3();
+  const rodTip = new THREE.Vector3();
+  function refreshRods() {
+    pedals.forEach((p, i) => {
+      rodTip.set(0, 0.007, pedalDepth * 0.88)
+        .applyAxisAngle(new THREE.Vector3(1, 0, 0), p.pivot.rotation.x)
+        .add(p.pivot.position);
+      rodBase.set(rodTip.x, -0.024, rodTip.z);
+      orientInstancedCylinder(rods, i, rodBase, rodTip);
+    });
+    rods.instanceMatrix.needsUpdate = true;
+  }
+  refreshRods();
+  root.add(rods);
+
+  // 琴凳只作为环境比例参照，不参与钢琴包围盒判断。
   const bench = new THREE.Group();
-  const seatY = 0.50;
-  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.06, 0.35), M.leather);
-  seat.position.y = seatY - 0.03;
-  seat.castShadow = true; seat.receiveShadow = true;
+  bench.name = 'bench';
+  const seat = box(0.58, 0.060, 0.35, M.leather, 0.012);
+  seat.position.y = 0.47;
   bench.add(seat);
-  const benchLegLen = seatY - 0.06;
-  for (const [sx, sz] of [[-0.24, -0.125], [0.24, -0.125], [-0.24, 0.125], [0.24, 0.125]]) {
-    const lg = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.024, benchLegLen, 12), M.ebony);
-    lg.position.set(sx, benchLegLen / 2, sz);
-    lg.castShadow = true;
-    bench.add(lg);
+  for (const [x, z] of [[-0.23, -0.12], [0.23, -0.12], [-0.23, 0.12], [0.23, 0.12]]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.020, 0.024, 0.46, 12), M.ebony);
+    leg.position.set(x, 0.22, z);
+    leg.castShadow = true;
+    bench.add(leg);
   }
   bench.position.set(cx, FLOOR_Y, 0.66);
-  bench.name = 'bench';
   root.add(bench);
 
-  // ---------------------------------------------------------------
-  //  对外接口
-  // ---------------------------------------------------------------
-  const bounds = {
-    centerX: cx, width: KW, depth: DEPTH,
-    topY: RIM_H, keyTopY: WHITE_TOP, floorY: FLOOR_Y,
-  };
+  const bounds = { centerX: cx, width: KW, depth: DEPTH, topY: RIM_TOP, keyTopY: KEY_TOP, floorY: FLOOR_Y };
 
   function setDamper(midi, lifted) {
     const i = damperIndex.get(midi);
     if (i === undefined) return;
-    const d = damperDefs[i];
-    if (d.lifted === lifted) return;
-    d.lifted = lifted;
-    m4.makeTranslation(d.x, DAMPER_Y + (lifted ? 0.017 : 0), d.z);
-    dampers.setMatrixAt(i, m4);
-    dampers.instanceMatrix.needsUpdate = true;
+    if (damperDefs[i].lifted === lifted) return;
+    damperDefs[i].lifted = lifted;
+    refreshDampers();
   }
 
   function setPedal(index, down) {
-    if (pedals[index]) pedals[index].target = down ? 1 : 0;
+    if (!pedals[index]) return;
+    pedals[index].target = down ? 1 : 0;
   }
 
   function update(dt) {
-    const kf = 1 - Math.exp(-dt * 34);
-    for (const k of keys.values()) {
-      const diff = k.target - k.press;
-      if (Math.abs(diff) < 0.0005 && k.press === k.target) continue;
-      k.press += diff * kf;
-      k.pivot.position.y = -k.press * KEY_DIP;   // 垂直下压，不产生旋转形变
-      const glow = k.press * (k.isBlack ? 0.5 : 0.34);
-      k.material.emissive.setRGB(glow * 0.30, glow * 0.52, glow * 0.95);
-    }
-    for (const p of pedals) {
-      const diff = p.target - p.press;
-      if (Math.abs(diff) > 0.001) {
-        p.press += diff * (1 - Math.exp(-dt * 26));
-        p.mesh.position.y = p.baseY - p.press * 0.010;
-        p.mesh.rotation.x = p.press * 0.16;      // 前缘向下倾斜（正确踩踏方向）
+    const keyK = 1 - Math.exp(-dt * 34);
+    let changed = false;
+    layout.keys.forEach((k, i) => {
+      const key = keys.get(k.midi);
+      const diff = key.target - key.press;
+      if (Math.abs(diff) > 0.0005) {
+        key.press += diff * keyK;
+        key.pivot.rotation.x = key.press * key.maxAngle;
+        const glow = key.press * (key.isBlack ? 0.38 : 0.28);
+        key.material.emissive.setRGB(glow * 0.25, glow * 0.42, glow * 0.95);
+        changed = true;
       }
-    }
+      pressArr[i] = key.press;
+    });
+    if (changed) refreshHammers(pressArr);
+
+    pedals.forEach((p) => {
+      const diff = p.target - p.press;
+      if (Math.abs(diff) > 0.001) p.press += diff * (1 - Math.exp(-dt * 24));
+      p.pivot.rotation.x = p.press * 0.18;
+    });
+    refreshRods();
   }
 
   return {
-    group: root, keys, keyMeshes, bounds, layout, materials: M,
-    setDamper, setPedal, updateLid, update,
+    group: root,
+    keys,
+    keyMeshes,
+    pedalMeshes,
+    bounds,
+    layout,
+    materials: M,
+    setDamper,
+    setPedal,
+    updateLid,
+    update,
+    // 供 tools/selfcheck.mjs 验证嵌套与开孔几何（只读）
+    outlines: { outer, inner, lipInner, soundboardPts, platePts, plateFramePts, plateHoles, stringDefs },
     get lidProgress() { return lidProgress; },
   };
 }

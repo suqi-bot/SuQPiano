@@ -39,6 +39,7 @@ export class SceneManager {
     this._setupEnvironment();
     this._setupLights();
     this._setupFloor();
+    this._setupAtmosphere();
 
     this._transition = null;
     this._onResize = () => this.resize();
@@ -95,6 +96,37 @@ export class SceneManager {
     this.spot = spot;
   }
 
+  _setupAtmosphere() {
+    // 轻量级影棚尘埃：给静态背景增加空间层次，同时避免遮挡琴键。
+    const count = 150;
+    const positions = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      positions[i * 3] = -1.5 + Math.random() * 3.2;
+      positions[i * 3 + 1] = 0.12 + Math.random() * 2.65;
+      positions[i * 3 + 2] = -2.3 + Math.random() * 3.4;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.PointsMaterial({
+      color: 0xfff4df, size: 0.009, sizeAttenuation: true,
+      transparent: true, opacity: 0.16, depthWrite: false,
+    });
+    this.dust = new THREE.Points(geo, mat);
+    this.dust.frustumCulled = false;
+    this.scene.add(this.dust);
+    this._dustClock = 0;
+
+    // 暖色低位反弹光 + 顶部冷光，增强漆面反射与琴下空间感。
+    const warm = new THREE.RectAreaLight(0xffd7aa, 1.8, 2.2, 1.1);
+    warm.position.set(0.55, 0.10, 1.05);
+    warm.rotation.x = -Math.PI / 2;
+    this.scene.add(warm);
+    const cool = new THREE.RectAreaLight(0xcad9ff, 2.0, 2.8, 1.4);
+    cool.position.set(0.4, 2.7, -0.8);
+    cool.rotation.x = Math.PI / 2;
+    this.scene.add(cool);
+  }
+
   _setupFloor() {
     // 大面积暖灰地面
     const geo = new THREE.CircleGeometry(10, 64);
@@ -135,11 +167,13 @@ export class SceneManager {
 
   /** 根据钢琴包围盒生成视角预设 */
   presets(b) {
-    const cx = b.centerX, ky = b.keyTopY, ty = b.topY;
+    const cx = b.centerX, ky = b.keyTopY, ty = b.topY, kw = b.width;
     return {
       hero: {
-        // 全貌：从正面略偏左、高位俯瞰，可完整呈现翼形琴身 + 开盖琴腔（琴弦/铸铁框）+ 键盘
-        pos: [cx - 0.10, 1.72, 1.65], target: [cx, 0.26, -b.depth * 0.52], fov: 40,
+        // 全貌：从琴身右前方高位俯瞰。开起的顶盖铰链在左侧 spine、向高音侧抬起，
+        // 相机偏右才能从琴盖抬缘下方看进去（射线采样：内构可见面 35% → 54%），
+        // 同时保留翼形琴身 + 琴弦/铸铁框 + 键盘。
+        pos: [cx + 0.55, 1.85, 1.95], target: [cx - 0.02, 0.30, -0.80], fov: 40,
         label: '全貌',
       },
       player: {
@@ -157,8 +191,11 @@ export class SceneManager {
         label: '全景',
       },
       top: {
-        pos: [cx, 2.75, -b.depth * 0.46], target: [cx, 0.05, -b.depth * 0.5], fov: 50,
-        label: '俯视',
+        // 内腔俯视：琴盖铰链在 spine 直边、向高音侧抬起，像一个斜搭在琴身上的坡面，
+        // 正俯视会被整片盖住。相机移到高音侧斜上方（琴盖抬缘之外），
+        // 视线从抬缘下方穿入，即可看到弦床 / 铁板开窗 / 音板 / 琴码 / 击弦机。
+        pos: [cx + kw * 0.95, 2.30, 0.85], target: [cx - 0.05, 0.40, -0.72], fov: 44,
+        label: '内腔俯视',
       },
       side: {
         pos: [cx - 2.3, 0.78, 0.15], target: [cx, ty - 0.04, -b.depth * 0.35], fov: 45,
@@ -189,6 +226,17 @@ export class SceneManager {
   }
 
   update(dt) {
+    if (this.dust) {
+      this._dustClock += dt;
+      const pos = this.dust.geometry.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i);
+        const y = pos.getY(i) + dt * (0.004 + (i % 5) * 0.001);
+        pos.setY(i, y > 2.85 ? 0.12 : y);
+        pos.setX(i, x + Math.sin(this._dustClock * 0.35 + i) * dt * 0.0015);
+      }
+      pos.needsUpdate = true;
+    }
     if (this._transition) {
       const tr = this._transition;
       tr.t = Math.min(1, tr.t + dt / 0.85);

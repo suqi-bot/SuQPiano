@@ -15,6 +15,8 @@ import { PianoSynth } from '../core/PianoSynth.js';
 import { InputManager } from '../input/InputManager.js';
 import { ControlPanel } from '../ui/ControlPanel.js';
 import { DEMO_SONGS } from './DemoSongs.js';
+import { Recorder } from './Recorder.js';
+import { NoteEditorController } from '../editor/NoteEditorController.js';
 import { midiToName } from '../core/NoteUtils.js';
 
 export class PianoApp {
@@ -32,7 +34,8 @@ export class PianoApp {
     /** midi -> Set<source>：支持键盘/鼠标/触摸/示范曲同时按住同一个音 */
     this.held = new Map();
     this.velocityScale = 0.85;
-    this.pedal = false;
+    this.pedals = { sustain: false, sostenuto: false, soft: false };
+    this.sostenutoHeld = new Set();
     this.demo = null;
     this.lastNote = null;
     this.audioReady = false;
@@ -41,6 +44,8 @@ export class PianoApp {
 
     this.input = new InputManager(this, this.sceneMgr, this.piano);
     this.ui = new ControlPanel(this);
+    this.recorder = new Recorder(this);
+    this.noteEditor = new NoteEditorController(this);
 
     this.sceneMgr.setView('hero', this.piano.bounds, true);
     this.labels.setOctaveBase(this.input.octaveBase);
@@ -60,6 +65,9 @@ export class PianoApp {
     this.audioReady = true;
     this.synth.setMasterVolume(this.ui.values.volume);
     this.synth.setReverb(this.ui.values.reverb);
+    this.synth.setPedal(0, this.pedals.sustain);
+    this.synth.setPedal(1, this.pedals.sostenuto);
+    this.synth.setPedal(2, this.pedals.soft);
     this.ui.updateStatus({ latency: this.synth.getLatencyMs() });
   }
 
@@ -83,6 +91,7 @@ export class PianoApp {
 
     this.lastNote = { midi, name: midiToName(midi), velocity: vel };
     this.ui.onNoteOn(midi, vel);
+    this.recorder?.captureOn(midi, vel, source);
   }
 
   releaseNote(midi, source = 'unknown', when) {
@@ -91,24 +100,41 @@ export class PianoApp {
     set.delete(source);
     if (set.size > 0) return;                    // 还有其他来源按住
 
+    this.recorder?.captureOff(midi, source);
+
     this.held.delete(midi);
     if (this.audioReady) this.synth.noteOff(midi, when);
 
     const key = this.piano.keys.get(midi);
     if (key) key.target = 0;
-    this.piano.setDamper(midi, this.pedal);
+    this.piano.setDamper(midi, this.pedals.sustain || this.pedals.sostenuto && this.sostenutoHeld.has(midi));
   }
 
   // ---------------- 控制接口 ----------------
-  setPedal(down) {
-    if (this.pedal === down) return;
-    this.pedal = down;
-    this.synth.setPedal(down);
-    this.piano.setPedal(2, down);                // 右踏板 = 延音
-    for (const midi of this.piano.keys.keys()) {
-      this.piano.setDamper(midi, down || this.held.has(midi));
+  /** 控制三块踏板：0 右延音、1 中持音、2 左柔音；保留 setPedal(bool) 兼容旧快捷键。 */
+  setPedal(index, down) {
+    if (typeof index === 'boolean') { down = index; index = 0; }
+    const names = ['sustain', 'sostenuto', 'soft'];
+    const name = names[index];
+    if (!name) return;
+    const next = !!down;
+    if (this.pedals[name] === next) return;
+    this.pedals[name] = next;
+
+    if (index === 1 && next) {
+      // 中踏板只锁住踩下瞬间已经发声的音，不影响之后弹奏的新音。
+      this.sostenutoHeld = new Set(this.synth.voices.filter((v) => !v.released).map((v) => v.midi));
     }
-    this.ui.setPedalState(down);
+    if (index === 1 && !next) this.sostenutoHeld.clear();
+
+    if (this.audioReady) this.synth.setPedal(index, next);
+    this.piano.setPedal(index, next);
+    for (const midi of this.piano.keys.keys()) {
+      const held = this.held.has(midi);
+      const latched = this.pedals.sostenuto && this.sostenutoHeld.has(midi);
+      this.piano.setDamper(midi, held || this.pedals.sustain || latched);
+    }
+    this.ui.setPedalState(index, next);
   }
 
   setVelocityScale(v) { this.velocityScale = v; }
@@ -136,7 +162,9 @@ export class PianoApp {
     this.input.keyboardNotes.clear();
     this.input.pointerNotes.clear();
     this.synth.allNotesOff();
-    this.setPedal(false);
+    this.setPedal(0, false);
+    this.setPedal(1, false);
+    this.setPedal(2, false);
   }
 
   // ---------------- 示范曲 ----------------

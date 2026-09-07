@@ -21,9 +21,11 @@ export class InputManager {
     this.raycaster = new THREE.Raycaster();
     this.ndc = new THREE.Vector2();
     this.pointerNotes = new Map();     // pointerId -> midi
+    this.pointerPedals = new Map();    // pointerId -> pedal index
     this.keyboardNotes = new Map();    // code -> midi
     this.baseMidi = 48;                // C3：电脑键盘映射的基准音
     this.hoverMidi = null;
+    this.pedalShortcut = null;
 
     this._bind();
   }
@@ -52,11 +54,18 @@ export class InputManager {
 
   // ------------------------------------------------------------------
   _onKeyDown(e) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
     const code = e.code;
 
-    // 全局快捷键
-    if (code === 'Space') { e.preventDefault(); if (!e.repeat) this.app.setPedal(true); return; }
+    // 三踏板快捷键：Space=延音，Shift+Space=持音，Alt+Space=柔音。
+    if (code === 'Space') {
+      e.preventDefault();
+      if (!e.repeat) {
+        this.pedalShortcut = e.altKey ? 2 : (e.shiftKey ? 1 : 0);
+        this.app.setPedal(this.pedalShortcut, true);
+      }
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (code === 'ArrowLeft' || code === 'Minus') { e.preventDefault(); this._shiftOctave(-1); return; }
     if (code === 'ArrowRight' || code === 'Equal') { e.preventDefault(); this._shiftOctave(1); return; }
     if (code === 'KeyL' && !e.repeat) { this.app.toggleLid(); return; }
@@ -79,7 +88,12 @@ export class InputManager {
   }
 
   _onKeyUp(e) {
-    if (e.code === 'Space') { this.app.setPedal(false); return; }
+    if (e.code === 'Space') {
+      const pedal = this.pedalShortcut ?? (e.altKey ? 2 : (e.shiftKey ? 1 : 0));
+      this.pedalShortcut = null;
+      this.app.setPedal(pedal, false);
+      return;
+    }
     const midi = this.keyboardNotes.get(e.code);
     if (midi === undefined) return;
     this.keyboardNotes.delete(e.code);
@@ -89,7 +103,7 @@ export class InputManager {
   _shiftOctave(dir) {
     const next = this.baseMidi + dir * 12;
     const { startMidi, endMidi } = this.app.range;
-    if (next < startMidi || next + 28 > endMidi) return;
+    if (next < startMidi || next + 33 > endMidi) return;
     // 已按下的键先松开，避免换八度后卡音
     for (const [code, midi] of [...this.keyboardNotes]) {
       this.app.releaseNote(midi, 'kb:' + code);
@@ -116,16 +130,34 @@ export class InputManager {
     return { midi, velocity: 0.55 + ratio * 0.45 };
   }
 
+  _pickPedal(e) {
+    if (!this.piano.pedalMeshes?.length) return null;
+    const rect = this.canvas.getBoundingClientRect();
+    this.ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.ndc, this.sceneMgr.camera);
+    const hits = this.raycaster.intersectObjects(this.piano.pedalMeshes, false);
+    return hits.length ? hits[0].object.userData.pedalIndex : null;
+  }
+
   _onPointerDown(e) {
     if (e.button === 2 || e.button === 1) return;      // 右键/中键留给视角操作
     const hit = this._pick(e);
-    if (!hit) return;
-
-    // 命中琴键 → 本次拖拽不旋转相机，改为滑奏
-    this.sceneMgr.controls.enabled = false;
-    this.canvas.setPointerCapture?.(e.pointerId);
-    this.pointerNotes.set(e.pointerId, hit.midi);
-    this.app.pressNote(hit.midi, hit.velocity, 'pt:' + e.pointerId);
+    if (hit) {
+      // 命中琴键 → 本次拖拽不旋转相机，改为滑奏
+      this.sceneMgr.controls.enabled = false;
+      this.canvas.setPointerCapture?.(e.pointerId);
+      this.pointerNotes.set(e.pointerId, hit.midi);
+      this.app.pressNote(hit.midi, hit.velocity, 'pt:' + e.pointerId);
+      return;
+    }
+    const pedal = this._pickPedal(e);
+    if (pedal !== null) {
+      this.sceneMgr.controls.enabled = false;
+      this.canvas.setPointerCapture?.(e.pointerId);
+      this.pointerPedals.set(e.pointerId, pedal);
+      this.app.setPedal(pedal, true);
+    }
   }
 
   _onPointerMove(e) {
@@ -144,10 +176,16 @@ export class InputManager {
   }
 
   _onPointerUp(e) {
+    const pedal = this.pointerPedals.get(e.pointerId);
+    if (pedal !== undefined) {
+      this.pointerPedals.delete(e.pointerId);
+      this.app.setPedal(pedal, false);
+    }
     const midi = this.pointerNotes.get(e.pointerId);
-    if (midi === undefined) return;
-    this.pointerNotes.delete(e.pointerId);
-    this.app.releaseNote(midi, 'pt:' + e.pointerId);
-    if (this.pointerNotes.size === 0) this.sceneMgr.controls.enabled = true;
+    if (midi !== undefined) {
+      this.pointerNotes.delete(e.pointerId);
+      this.app.releaseNote(midi, 'pt:' + e.pointerId);
+    }
+    if (this.pointerNotes.size === 0 && this.pointerPedals.size === 0) this.sceneMgr.controls.enabled = true;
   }
 }

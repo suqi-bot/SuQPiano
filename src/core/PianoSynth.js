@@ -24,6 +24,8 @@ export class PianoSynth {
     this.voices = [];            // 正在发声的 voice
     this.pendingRelease = [];    // 踏板踩下时挂起待释放的 voice
     this.pedalDown = false;
+    this.sostenutoDown = false;
+    this.softDown = false;
     this._masterVolume = 0.75;
     this._reverbAmount = 0.32;
   }
@@ -91,6 +93,31 @@ export class PianoSynth {
     this.wet.gain.setTargetAtTime(Math.sin(amount * Math.PI * 0.5) * 0.9, t, 0.05);
   }
 
+  _pedalSound(index, down) {
+    if (!this.ready) return;
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    const freq = index === 2 ? 210 : (index === 1 ? 145 : 105);
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(freq * (down ? 1 : 0.82), now);
+    osc.frequency.exponentialRampToValueAtTime(freq * 0.58, now + 0.07);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.018, now + 0.003);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.085);
+    osc.connect(gain); gain.connect(this.dry);
+    osc.start(now); osc.stop(now + 0.10);
+
+    const n = ctx.createBufferSource();
+    const ng = ctx.createGain();
+    n.buffer = this.noiseBuffer;
+    ng.gain.setValueAtTime(0.012, now);
+    ng.gain.exponentialRampToValueAtTime(0.0001, now + 0.045);
+    n.connect(ng); ng.connect(this.dry);
+    n.start(now); n.stop(now + 0.06);
+  }
+
   /** 输出延迟（ms），用于 HUD 显示音画同步状态 */
   getLatencyMs() {
     if (!this.ctx) return 0;
@@ -110,6 +137,7 @@ export class PianoSynth {
     const ctx = this.ctx;
     const t0 = Math.max(ctx.currentTime, when ?? ctx.currentTime);
     const vel = Math.max(0.03, Math.min(1, velocity));
+    const expressiveVel = this.softDown ? vel * 0.68 : vel;
 
     // 同音重击：先快速制音旧 voice（真实钢琴的行为）
     for (let i = this.voices.length - 1; i >= 0; i--) {
@@ -124,7 +152,7 @@ export class PianoSynth {
     const B = 0.00008 + x * x * 0.0018;
     // 基频衰减时间：低音 26s，高音 ~1.7s
     const decay = 26 * Math.pow(2, -(midi - 21) / 22);
-    const bright = Math.pow(vel, 1.25);
+    const bright = Math.pow(expressiveVel, 1.25) * (this.softDown ? 0.72 : 1);
 
     // ---------- voice 输出链 ----------
     const out = ctx.createGain();
@@ -141,7 +169,7 @@ export class PianoSynth {
     out.connect(this.wetSend);
 
     // ---------- 分音 ----------
-    const baseAmp = 0.17 * Math.pow(vel, 1.35) * (1 + (1 - x) * 0.55);
+    const baseAmp = 0.17 * Math.pow(expressiveVel, 1.35) * (1 + (1 - x) * 0.55);
     const partialGains = [
       1,
       0.52 * bright,
@@ -154,7 +182,7 @@ export class PianoSynth {
     const unisonCents = midi < 36 ? 0.55 : 0.85;
 
     const now = t0;
-    const attack = 0.002 + (1 - vel) * 0.004;
+    const attack = 0.002 + (1 - expressiveVel) * 0.004;
     let longest = 0;
 
     for (let n = 1; n <= partialGains.length; n++) {
@@ -204,6 +232,7 @@ export class PianoSynth {
 
     const voice = {
       midi, out, filter, t0, decay: longest, released: false,
+      pending: false, sostenutoLatched: false,
       releaseAt: Infinity, killer: null,
     };
 
@@ -220,8 +249,8 @@ export class PianoSynth {
     for (let i = this.voices.length - 1; i >= 0; i--) {
       const v = this.voices[i];
       if (v.midi === midi && !v.released) {
-        if (this.pedalDown) {
-          v.pending = true;                       // 踏板踩下 → 延后制音
+        if (this.pedalDown || v.sostenutoLatched) {
+          v.pending = true;                       // 延音或持音踏板踩下 → 延后制音
         } else {
           this._releaseVoice(v, undefined, when);
         }
@@ -229,11 +258,29 @@ export class PianoSynth {
     }
   }
 
-  setPedal(down) {
-    this.pedalDown = down;
-    if (!down && this.ready) {
+  /** 控制三块踏板：0 延音 / 1 持音 / 2 柔音。保留 setPedal(bool) 兼容旧调用。 */
+  setPedal(index, down) {
+    if (typeof index === 'boolean') { down = index; index = 0; }
+    const next = !!down;
+    const previous = index === 0 ? this.pedalDown : (index === 1 ? this.sostenutoDown : this.softDown);
+    if (index === 0) this.pedalDown = next;
+    else if (index === 1) {
+      if (next && !this.sostenutoDown) {
+        for (const v of this.voices) if (!v.released) v.sostenutoLatched = true;
+      }
+      this.sostenutoDown = next;
+    } else if (index === 2) this.softDown = next;
+    if (previous !== next) this._pedalSound(index, next);
+    if (this.ready && (index === 0 || index === 1) && !down) {
       for (const v of this.voices) {
-        if (!v.released && v.pending) { v.pending = false; this._releaseVoice(v); }
+        if (!v.released && v.pending && !this.pedalDown && !v.sostenutoLatched) {
+          v.pending = false; this._releaseVoice(v);
+        }
+        if (!v.released && index === 1) v.sostenutoLatched = false;
+      }
+      // 释放持音踏板后，尚未被延音踏板保护的声音立即进入制音阶段。
+      if (index === 1) for (const v of this.voices) {
+        if (!v.released && v.pending && !this.pedalDown) { v.pending = false; this._releaseVoice(v); }
       }
     }
   }

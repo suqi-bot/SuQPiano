@@ -58,8 +58,8 @@ ok(isBlackKey(29) === false && isBlackKey(30) === true, 'F1 白键 / F#1 黑键'
 console.log('\n[3] 电脑键盘映射');
 ok(Object.keys(KEY_TO_OFFSET).length >= 34, '映射键位数', String(Object.keys(KEY_TO_OFFSET).length));
 const offs = Object.values(KEY_TO_OFFSET);
-ok(Math.max(...offs) === 28 && Math.min(...offs) === 0, '覆盖 0~28 半音（约 2.3 个八度）');
-ok(OFFSET_LABELS.length === 29, '标签表长度 = 29', String(OFFSET_LABELS.length));
+ok(Math.max(...offs) === 33 && Math.min(...offs) === 0, '覆盖 0~33 半音（符号键 [ ] \\ 落在白键 F5/G5/A5）');
+ok(OFFSET_LABELS.length === 34, '标签表长度 = 34', String(OFFSET_LABELS.length));
 
 console.log('\n[4] 三维建模（真实构建一次）');
 const piano = buildPiano({ startMidi: 28, endMidi: 108 });
@@ -97,13 +97,113 @@ ok(Math.abs((piano.bounds.keyTopY - piano.bounds.floorY) - 0.72) < 1e-9,
 ok(piano.bounds.keyTopY < piano.bounds.topY, '键面低于琴身上沿（可见内腔）',
   `键面 ${piano.bounds.keyTopY} / 上沿 ${piano.bounds.topY}`);
 
+// 内腔分层几何：环/开孔一旦退化成实心板，从上方看就只剩一块平板（“内构不显示”的根因）。
+console.log('\n[4b] 内腔分层几何（环与开孔不得退化成实心板）');
+const ol = piano.outlines;
+// 射线法内点测试：与 PianoModel 里的同名函数独立实现，做交叉验证。
+function inPoly(pts, x, z) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    if ((pts[i].y > z) !== (pts[j].y > z)
+      && x < (pts[j].x - pts[i].x) * (z - pts[i].y) / (pts[j].y - pts[i].y) + pts[i].x) inside = !inside;
+  }
+  return inside;
+}
+function polyArea(pts) {
+  let s = 0;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) s += pts[j].x * pts[i].y - pts[i].x * pts[j].y;
+  return Math.abs(s / 2);
+}
+const nested = (a, b) => a.every((p) => inPoly(b, p.x, p.y));
+ok(nested(ol.inner, ol.outer), '内壁严格在外轮廓之内（rim 壁环成立）');
+ok(nested(ol.lipInner, ol.inner), '压边内孔严格在内壁之内');
+ok(nested(ol.soundboardPts, ol.inner), '音板轮廓严格在内壁之内');
+ok(nested(ol.platePts, ol.soundboardPts), '铁板轮廓严格在音板之内');
+ok(nested(ol.plateFramePts, ol.platePts), '铁板压条内孔严格在铁板之内');
+ok(ol.plateHoles.length >= 5 && ol.plateHoles.every((h) => h.every((p) => inPoly(ol.platePts, p.x, p.y))),
+  '铁板开窗全部落在铁板内', `${ol.plateHoles.length} 个开口`);
+
+// 从挤出几何里取顶面（三个顶点同高）三角形面积和，用来发现“丢孔退化成实心板”。
+function topCapArea(name) {
+  const mesh = piano.group.getObjectByName(name);
+  if (!mesh) return NaN;
+  const pos = mesh.geometry.attributes.position;
+  let yMax = -Infinity, area = 0;
+  for (let i = 0; i < pos.count; i += 3) {
+    const y0 = pos.getY(i), y1 = pos.getY(i + 1), y2 = pos.getY(i + 2);
+    if (Math.abs(y0 - y1) > 1e-9 || Math.abs(y1 - y2) > 1e-9) continue;   // 侧壁
+    if (y0 > yMax + 1e-9) { yMax = y0; area = 0; }
+    if (Math.abs(y0 - yMax) > 1e-9) continue;
+    const ax = pos.getX(i), az = pos.getZ(i);
+    const bx = pos.getX(i + 1), bz = pos.getZ(i + 1);
+    const dx = pos.getX(i + 2), dz = pos.getZ(i + 2);
+    area += Math.abs((bx - ax) * (dz - az) - (dx - ax) * (bz - az)) / 2;
+  }
+  return area;
+}
+const innerArea = polyArea(ol.inner);
+const plateArea = polyArea(ol.platePts);
+const lipCap = topCapArea('innerLip');
+const frameCap = topCapArea('plateFrame');
+const plateCap = topCapArea('plate');
+ok(lipCap > 0 && lipCap / innerArea < 0.20, '内圈压边是真正的环（不是封板）', `占内腔 ${(lipCap / innerArea * 100).toFixed(1)}%`);
+ok(frameCap > 0 && frameCap / plateArea < 0.20, '铁板压条是真正的环（不是封板）', `占铁板 ${(frameCap / plateArea * 100).toFixed(1)}%`);
+const holeArea = ol.plateHoles.reduce((s, h) => s + polyArea(h), 0);
+const expectCap = plateArea - holeArea;
+ok(plateCap > 0 && Math.abs(plateCap - expectCap) / expectCap < 0.02,
+  '铁板开窗被真实切穿（顶面 = 外形 − 各孔，且孔不重叠）', `切掉 ${(holeArea / plateArea * 100).toFixed(1)}%`);
+
+// 琴弦：同音弦组内不得互相穿插，整组也不能宽到挤占相邻音（否则弦床糊成一块白板）。
+const step = layout.totalWidth / (108 - 28);
+const byMidi = new Map();
+for (const s of ol.stringDefs) {
+  if (!byMidi.has(s.midi)) byMidi.set(s.midi, []);
+  byMidi.get(s.midi).push(s);
+}
+let selfClash = 0, crowd = 0;
+for (const list of byMidi.values()) {
+  list.sort((a, b) => a.x1 - b.x1);
+  for (let i = 1; i < list.length; i++) {
+    if (list[i].x1 - list[i - 1].x1 < list[i].radius + list[i - 1].radius) selfClash++;
+  }
+  if (list[list.length - 1].x1 - list[0].x1 > step * 0.9) crowd++;
+}
+ok(selfClash === 0, '同音弦彼此不穿插', `穿插 ${selfClash} 对`);
+ok(crowd === 0, '同音弦组不挤占相邻音（弦床留有可见缝隙）', `过宽 ${crowd} 组`);
+ok(ol.stringDefs.length > 200, '琴弦实例数', `${ol.stringDefs.length} 根`);
+
 // 琴键按压测试
 const k60 = piano.keys.get(60);
+// 取键前/后缘顶面角点在 pivot 局部坐标里的位置，实测世界位移（带符号）。
+// 注意：这里不能再用 Math.abs —— 之前就是因为取了绝对值，旋转符号写反
+// 导致"按下时前缘上抬"的 bug 一直没被自检抓到。
+const KEY_H = k60.topY - k60.pivotY;
+const topCornerY = (localZ) => {
+  piano.group.updateMatrixWorld(true);
+  return new THREE.Vector3(0, KEY_H, localZ).applyMatrix4(k60.pivot.matrixWorld).y;
+};
+const frontRestY = topCornerY(k60.frontZ - k60.pivotZ);
+const backRestY = topCornerY(k60.backZ - k60.pivotZ);
 k60.target = 1;
 for (let i = 0; i < 60; i++) piano.update(1 / 60);
-const dip = Math.abs(Math.sin(k60.pivot.rotation.x) * k60.length);
+const frontDownY = topCornerY(k60.frontZ - k60.pivotZ);
+const backDownY = topCornerY(k60.backZ - k60.pivotZ);
+const dFront = (frontDownY - frontRestY) * 1000;   // 前缘应为负（下沉）
+const dBack = (backDownY - backRestY) * 1000;      // 后缘应为正（抬起）
 ok(k60.press > 0.98, '按键动画在 1s 内到位', k60.press.toFixed(3));
-ok(dip > 0.007 && dip < 0.013, '键前端下沉 ≈ 10mm', (dip * 1000).toFixed(1) + 'mm');
+ok(dFront < -9 && dFront > -13, '键前端下沉 ≈ 10mm（方向朝下）', dFront.toFixed(1) + 'mm');
+ok(dBack > 3 && dBack < 7, '键后端抬起 ≈ 5mm（方向朝上）', '+' + dBack.toFixed(1) + 'mm');
+
+// 击弦机：按下时槌头必须真正触到弦面（之前 SHANK_LEN 太短，停在离弦 44mm 处）
+let hammerMesh = null;
+piano.group.traverse((o) => { if (o.isInstancedMesh && piano.materials.feltWhite === o.material) hammerMesh = o; });
+const hIdx = layout.keys.findIndex((kk) => kk.midi === 60);
+const hMat = new THREE.Matrix4();
+hammerMesh.getMatrixAt(hIdx, hMat);
+hammerMesh.geometry.computeBoundingBox();
+const hTopWorld = new THREE.Vector3(0, hammerMesh.geometry.boundingBox.max.y, 0)
+  .applyMatrix4(hMat.premultiply(hammerMesh.matrixWorld));
+ok(hTopWorld.y > 0.391 && hTopWorld.y < 0.401, '按键时槌头触弦（毡头顶入弦面）', hTopWorld.y.toFixed(3));
 k60.target = 0;
 for (let i = 0; i < 60; i++) piano.update(1 / 60);
 ok(k60.press < 0.02, '松键后回弹', k60.press.toFixed(4));
