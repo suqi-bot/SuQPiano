@@ -9,6 +9,8 @@
   "description": "81 键 3D 钢琴模拟器",
   "scripts": {
     "start": "python -m http.server 8123",
-    "check": "node tools/selfcheck.mjs"
+    "check": "node tools/selfcheck.mjs",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build.ps1",
+    "package": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/package.ps1"
   }
 }
