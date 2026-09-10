@@ -64,7 +64,11 @@ ok(OFFSET_LABELS.length === 34, '标签表长度 = 34', String(OFFSET_LABELS.len
 console.log('\n[4] 三维建模（真实构建一次）');
 const piano = buildPiano({ startMidi: 28, endMidi: 108 });
 ok(piano.keys.size === 81, '琴键对象数 = 81', String(piano.keys.size));
-ok(piano.keyMeshes.length === 81, '可拾取 mesh 数 = 81');
+// 黑键除了键帽还有一段向下延伸的键体（按下时填补键帽抬升后露出的空隙），也参与拾取。
+ok(piano.keyMeshes.length === 81 + 33, '可拾取 mesh 数 = 81 键帽 + 33 黑键键体', String(piano.keyMeshes.length));
+const pickable = new Set(piano.keyMeshes.map((m) => m.userData.midi));
+ok(pickable.size === 81 && piano.keyMeshes.every((m) => piano.keys.has(m.userData.midi)),
+  '每个可拾取 mesh 都能映射到琴键', `${pickable.size} 个 midi`);
 
 let meshes = 0, tris = 0, nan = 0;
 piano.group.traverse((o) => {

@@ -144,9 +144,10 @@ export class MidiPlayer {
   }
 
   _finish() {
-    this.playing = false;
-    this._emitState({ timeSec: this._songDuration, totalSec: this._songDuration, frac: 1 });
+    // 先 stop()：此时 playing 仍为 true，stop() 会释放余音、复位踏板并发 {playing:false} 复位按钮；
+    // 再用 _emitInfo() 把状态文本恢复为 “N 音 · 时长”。切勿在 stop() 前把 playing 置 false。
     this.stop();
+    this._emitInfo();
   }
 
   _tickProgress() {

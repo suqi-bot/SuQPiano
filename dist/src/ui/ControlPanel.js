@@ -208,6 +208,7 @@ export class ControlPanel {
       el.textContent = `${formatSeconds(s.timeSec)} / ${formatSeconds(this._midiTotal || 0)}`;
     } else if (s.noteCount !== undefined) {
       el.textContent = `${s.noteCount} 音 · ${formatSeconds(this._midiTotal || 0)}`;
+      if (s.playing === false && play) play.disabled = s.noteCount === 0;   // 0 音（如导引轨）不可播放
     }
   }
 

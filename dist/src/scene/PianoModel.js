@@ -13,11 +13,17 @@ import { computeKeyLayout } from '../core/NoteUtils.js';
 const FLOOR_Y = -0.50;
 const KEY_TOP = 0.22;
 const KEY_H = 0.022;
-const BLACK_H = 0.034;
+const BLACK_H = 0.0145;
+const BLACK_SINK = 0.0015;   // 黑键底面压进白键顶面的深度（避免共面闪烁）；露出白键面 ≈ 13mm，与真琴一致
+const BLACK_BODY_H = 0.055;  // 键帽下方的键体高度：埋进键床，按下时填补键帽抬升后露出的空隙
+const BLACK_SLOT = 0.0009;   // 白键键槽与黑键之间的单边间隙
 const KEY_FRONT_Z = 0.158;
 const KEY_BACK_Z = 0.004;
 const BALANCE_Z = 0.052;
 const RIM_TOP = 0.44;
+const LID_PIVOT_Y = RIM_TOP + 0.010;      // 琴盖铰链轴高度
+const LID_THICK = 0.026;                  // 琴盖板厚
+const LID_UNDER_Y = LID_PIVOT_Y - LID_THICK; // 闭合时琴盖底面：内构零件不得超过这条线
 const SOUND_TOP = 0.300;
 const PLATE_TOP = 0.352;
 const STRING_Y = 0.395;
@@ -147,6 +153,94 @@ function centroid2(points) {
   return s.multiplyScalar(1 / points.length);
 }
 
+/**
+ * ExtrudeGeometry 是“非索引”几何，three 的 computeVertexNormals() 只能给出逐面法线，
+ * 于是琴身弯侧 / 琴盖边缘这些曲面会渲染成一条条硬边平板。
+ * 这里按位置合并顶点后、只在夹角小于 crease 的面之间平均法线：
+ * 曲面恢复光滑，而顶面与侧壁之间的真实硬边（≈90°）依旧保持锐利。
+ */
+function smoothCreasedNormals(geo, crease = Math.PI / 5) {
+  const pos = geo.getAttribute('position');
+  const nrm = geo.getAttribute('normal');
+  if (!pos || !nrm) return geo;
+  const q = 1e5;
+  const buckets = new Map();
+  for (let i = 0; i < pos.count; i++) {
+    const k = `${Math.round(pos.getX(i) * q)},${Math.round(pos.getY(i) * q)},${Math.round(pos.getZ(i) * q)}`;
+    const list = buckets.get(k);
+    if (list) list.push(i); else buckets.set(k, [i]);
+  }
+  const cosCrease = Math.cos(crease);
+  const out = new Float32Array(nrm.count * 3);
+  const v = new THREE.Vector3();
+  for (const list of buckets.values()) {
+    for (const i of list) {
+      const fx = nrm.getX(i), fy = nrm.getY(i), fz = nrm.getZ(i);
+      let nx = 0, ny = 0, nz = 0;
+      for (const j of list) {
+        const dot = fx * nrm.getX(j) + fy * nrm.getY(j) + fz * nrm.getZ(j);
+        if (dot >= cosCrease) { nx += nrm.getX(j); ny += nrm.getY(j); nz += nrm.getZ(j); }
+      }
+      v.set(nx, ny, nz);
+      if (v.lengthSq() < 1e-12) v.set(fx, fy, fz); else v.normalize();
+      out[i * 3] = v.x; out[i * 3 + 1] = v.y; out[i * 3 + 2] = v.z;
+    }
+  }
+  geo.setAttribute('normal', new THREE.BufferAttribute(out, 3));
+  return geo;
+}
+
+/** 圆角多边形轮廓：每个角点用半径 r 的二次曲线倒角（键帽/白键的圆角靠它做）。 */
+function roundedShape(pts, r = 0.0022) {
+  const s = new THREE.Shape();
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const p = pts[i];
+    const prev = pts[(i - 1 + n) % n];
+    const next = pts[(i + 1) % n];
+    const d1 = new THREE.Vector2(prev.x - p.x, prev.y - p.y);
+    const d2 = new THREE.Vector2(next.x - p.x, next.y - p.y);
+    const l1 = d1.length(), l2 = d2.length();
+    if (l1 < 1e-9 || l2 < 1e-9 || Math.abs((d1.x * d2.y - d1.y * d2.x) / (l1 * l2)) < 1e-6) {
+      if (i === 0) s.moveTo(p.x, p.y); else s.lineTo(p.x, p.y);   // 共线点：直接连线
+      continue;
+    }
+    const t = Math.min(r, l1 * 0.5, l2 * 0.5);
+    const a = new THREE.Vector2(p.x + (d1.x / l1) * t, p.y + (d1.y / l1) * t);
+    const b = new THREE.Vector2(p.x + (d2.x / l2) * t, p.y + (d2.y / l2) * t);
+    if (i === 0) s.moveTo(a.x, a.y); else s.lineTo(a.x, a.y);
+    s.quadraticCurveTo(p.x, p.y, b.x, b.y);
+  }
+  s.closePath();
+  return s;
+}
+
+/**
+ * 把 X/Z 平面轮廓按精确尺寸挤出成 Y 方向几何（轮廓第二坐标使用 -Z）。
+ * 注意：不能用 ExtrudeGeometry 的 bevel —— bevel 是把轮廓向外扩，会让键帽/键槽宽度全部走样。
+ * 圆角改由 roundedShape() 在轮廓上做，挤出后以中心为原点，与 RoundedBoxGeometry 用法一致。
+ */
+function prismGeometry(shape, height) {
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: height, bevelEnabled: false, curveSegments: 6, steps: 1,
+  });
+  geo.rotateX(-Math.PI / 2);
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox;
+  geo.translate(0, -(bb.min.y + bb.max.y) / 2, 0);
+  smoothCreasedNormals(geo);
+  return geo;
+}
+
+/** 圆角矩形轮廓（宽度沿 X、长度沿 Z）。 */
+function keyRectShape(width, length, r = 0.0022) {
+  const hw = width / 2, hl = length / 2;
+  return roundedShape([
+    new THREE.Vector2(-hw, -hl), new THREE.Vector2(hw, -hl),
+    new THREE.Vector2(hw, hl), new THREE.Vector2(-hw, hl),
+  ], r);
+}
+
 /** 把 X/Z 平面轮廓挤出成 Y 方向几何。轮廓第二坐标使用 -Z。 */
 function extrudedPlanar(points, height, bevel = 0) {
   const shape = new THREE.Shape();
@@ -162,6 +256,7 @@ function extrudedPlanar(points, height, bevel = 0) {
     steps: 1,
   });
   geo.rotateX(-Math.PI / 2);
+  smoothCreasedNormals(geo);
   return geo;
 }
 
@@ -181,6 +276,7 @@ function slabGeometry(outerPts, holePtsList, height) {
   }
   const geo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false, curveSegments: 2, steps: 1 });
   geo.rotateX(-Math.PI / 2);
+  smoothCreasedNormals(geo);
   return geo;
 }
 
@@ -586,20 +682,24 @@ export function buildPiano({ startMidi = 28, endMidi = 108 } = {}) {
   const backFelt = box(KW, 0.006, 0.010, M.felt, 0.002);
   backFelt.position.set(cx, 0.198, -0.002);
   root.add(backFelt);
-  const fallboard = box(KW, 0.17, 0.024, M.ebony, 0.004);
-  fallboard.position.set(cx, 0.286, -0.020);
+  // 键盖（前挡板）：真琴弹奏时键盖是折回平放的，这里做成一堵矮挡板，
+  // 顶面必须低于谱架下沿，否则会和谱架叠成一堵“黑墙”。
+  const fallboard = box(KW, 0.10, 0.024, M.ebony, 0.004);
+  fallboard.position.set(cx, 0.250, -0.020);
   root.add(fallboard);
 
-  // 参考图中的谱架：拱顶圆角面板、顶端背离演奏者倾斜、底部托条。
+  // 谱架：拱顶圆角面板、顶端背离演奏者倾斜、底部托条。
+  // 关键约束：顶边必须低于闭合琴盖底面 LID_UNDER_Y，否则关盖时谱架会戳穿琴盖。
   const deskW = KW * 0.62;
-  const deskH = 0.22;
+  const deskBaseY = 0.275;                       // 谱架下沿（与键井盖板同高，被键盖遮住）
+  const deskH = (LID_UNDER_Y - 0.004 - deskBaseY) / Math.cos(0.16) - 0.016; // 面板高度（含拱顶留量）
   const deskShape = new THREE.Shape();
-  deskShape.moveTo(-deskW / 2, -0.105);
+  deskShape.moveTo(-deskW / 2, 0);
   deskShape.lineTo(-deskW / 2, deskH - 0.055);
   deskShape.quadraticCurveTo(-deskW / 2, deskH - 0.014, -deskW / 2 + 0.06, deskH - 0.008);
   deskShape.quadraticCurveTo(0, deskH + 0.016, deskW / 2 - 0.06, deskH - 0.008);
   deskShape.quadraticCurveTo(deskW / 2, deskH - 0.014, deskW / 2, deskH - 0.055);
-  deskShape.lineTo(deskW / 2, -0.105);
+  deskShape.lineTo(deskW / 2, 0);
   deskShape.closePath();
   const desk = new THREE.Group();
   const deskPanel = new THREE.Mesh(new THREE.ExtrudeGeometry(deskShape, {
@@ -609,21 +709,21 @@ export function buildPiano({ startMidi = 28, endMidi = 108 } = {}) {
   const deskLip = box(deskW * 1.06, 0.016, 0.052, M.ebonySat, 0.003);
   deskLip.position.set(0, 0.020, 0.030);
   desk.add(deskPanel, deskLip);
-  desk.position.set(cx, 0.360, -0.105);
+  desk.position.set(cx, deskBaseY, -0.062);
   desk.rotation.x = -0.16;
   root.add(desk);
   // 键盖与谱架之间的暗色键井盖板，遮住音板前缘。
   const keywell = box(deskW * 1.02, 0.030, 0.10, M.ebonySat, 0.004);
   keywell.position.set(cx, 0.315, -0.075);
   root.add(keywell);
-  // 谱架两侧的平盖板（键盖顶线与 rim 内壁之间，参考图正/透视图中的方块）。
+  // 谱架两侧的平盖板（键井盖板延伸到 rim 内壁，与真琴的谱架侧板同高同深）。
   const innerL = cx + (outer[0].x - cx) * 0.925;
   const innerR = cx + (outer[1].x - cx) * 0.925;
   for (const [edgeFrom, edgeTo] of [[innerL + 0.012, cx - deskW / 2], [cx + deskW / 2, innerR - 0.012]]) {
     const w = edgeTo - edgeFrom;
     if (w <= 0.02) continue;
-    const shoulder = box(w, 0.07, 0.07, M.ebonySat, 0.006);
-    shoulder.position.set((edgeFrom + edgeTo) / 2, 0.365, -0.08);
+    const shoulder = box(w, 0.030, 0.10, M.ebonySat, 0.006);
+    shoulder.position.set((edgeFrom + edgeTo) / 2, 0.315, -0.075);
     root.add(shoulder);
   }
 
@@ -637,8 +737,47 @@ export function buildPiano({ startMidi = 28, endMidi = 108 } = {}) {
   const keyMeshes = [];
   const whiteSample = layout.keys.find((k) => !k.isBlack);
   const blackSample = layout.keys.find((k) => k.isBlack);
-  const whiteGeo = new RoundedBoxGeometry(whiteSample.width, KEY_H, whiteSample.length, 2, 0.0022);
-  const blackGeo = new RoundedBoxGeometry(blackSample.width, BLACK_H, blackSample.length, 2, 0.0022);
+  const blackGeo = prismGeometry(keyRectShape(blackSample.width, blackSample.length), BLACK_H);
+  // 黑键键体：键帽下方延伸一段略窄的键体，嵌在白键之间的键槽里。
+  // 只有键帽时，按下后抬起的那一端下方会直接露出白键顶面，像一块悬空方块。
+  const blackBodyGeo = prismGeometry(keyRectShape(blackSample.width * 0.95, blackSample.length * 0.97, 0.0012), BLACK_BODY_H);
+  // 白键靠键尾的一段要给黑键让位（真琴白键在这里是铣出键槽的）：
+  // 键尾边界直接由相邻黑键键体外缘 + 间隙算出（黑键并不在键缝正中，不能用固定让位量）。
+  // 有了键槽，黑键键体才落在白键之间，按下时槽内可见键体，而不会露出白键顶面。
+  const blackKeys = layout.keys.filter((k) => k.isBlack);
+  const blackFrontZ = blackKeys.reduce((m, k) => Math.max(m, 0.002 + k.length), 0);
+  const whiteGeoCache = new Map();
+  function whiteKeyGeometry(centerX) {
+    const halfW = whiteSample.width / 2;
+    const halfL = whiteSample.length / 2;
+    const halfSlot = blackSample.width / 2 + BLACK_SLOT;   // 黑键半宽 + 单边间隙
+    let tailLeft = -halfW;
+    let tailRight = halfW;
+    for (const b of blackKeys) {
+      const dx = b.centerX - centerX;
+      if (dx > 0) tailRight = Math.min(tailRight, dx - halfSlot);
+      else if (dx < 0) tailLeft = Math.max(tailLeft, dx + halfSlot);
+    }
+    tailLeft = Math.max(tailLeft, -halfW);
+    tailRight = Math.min(tailRight, halfW);
+    const cacheKey = `${tailLeft.toFixed(5)}|${tailRight.toFixed(5)}`;
+    const cached = whiteGeoCache.get(cacheKey);
+    if (cached) return cached;
+    // 形状坐标 y = -局部 z：键前端为 -halfL、键尾为 +halfL
+    const tailY = -(blackFrontZ + 0.004 - (KEY_BACK_Z + halfL));    // 键尾段的起始 z（覆盖黑键全长）
+    const pts = [
+      new THREE.Vector2(-halfW, -halfL),                             // 键前端左
+      new THREE.Vector2(halfW, -halfL),                              // 键前端右
+      new THREE.Vector2(halfW, tailY),                               // 右侧走到键尾段起点
+    ];
+    if (tailRight < halfW - 1e-6) pts.push(new THREE.Vector2(tailRight, tailY));
+    pts.push(new THREE.Vector2(tailRight, halfL));                   // 键尾右
+    pts.push(new THREE.Vector2(tailLeft, halfL));                    // 键尾左
+    if (tailLeft > -halfW + 1e-6) pts.push(new THREE.Vector2(tailLeft, tailY), new THREE.Vector2(-halfW, tailY));
+    const geo = prismGeometry(roundedShape(pts, 0.0022), KEY_H);
+    whiteGeoCache.set(cacheKey, geo);
+    return geo;
+  }
   layout.keys.forEach((k, i) => {
     const isBlack = k.isBlack;
     const backZ = isBlack ? 0.002 : KEY_BACK_Z;
@@ -648,18 +787,26 @@ export function buildPiano({ startMidi = 28, endMidi = 108 } = {}) {
     pivot.position.set(k.centerX, pivotY, BALANCE_Z);
     const mat = (isBlack ? M.blackKey : M.whiteKey).clone();
     mat.emissive = new THREE.Color(0x000000);
-    const mesh = new THREE.Mesh(isBlack ? blackGeo : whiteGeo, mat);
-    mesh.position.set(0, isBlack ? KEY_H + BLACK_H / 2 : KEY_H / 2,
+    const mesh = new THREE.Mesh(isBlack ? blackGeo : whiteKeyGeometry(k.centerX), mat);
+    mesh.position.set(0, isBlack ? KEY_H - BLACK_SINK + BLACK_H / 2 : KEY_H / 2,
       (backZ + frontZ) / 2 - BALANCE_Z);
     mesh.castShadow = true; mesh.receiveShadow = true;
     mesh.userData.midi = k.midi;
     pivot.add(mesh);
-    root.add(pivot);
     keyMeshes.push(mesh);
+    if (isBlack) {
+      const body = new THREE.Mesh(blackBodyGeo, mat);   // 与键帽共用材质，按键高亮一起生效
+      body.position.set(0, KEY_H - BLACK_SINK - BLACK_BODY_H / 2, mesh.position.z);
+      body.castShadow = true;
+      body.userData.midi = k.midi;
+      pivot.add(body);
+      keyMeshes.push(body);
+    }
+    root.add(pivot);
     keys.set(k.midi, {
       midi: k.midi, isBlack, pivot, mesh, material: mat,
       length: k.length, backZ, frontZ, centerX: k.centerX,
-      topY: isBlack ? KEY_TOP + BLACK_H : KEY_TOP,
+      topY: isBlack ? KEY_TOP + BLACK_H - BLACK_SINK : KEY_TOP,
       pivotY, pivotZ: BALANCE_Z,
       press: 0, target: 0,
       maxAngle: Math.asin(0.010 / Math.max(0.001, frontZ - BALANCE_Z)),
@@ -675,7 +822,7 @@ export function buildPiano({ startMidi = 28, endMidi = 108 } = {}) {
   const lidGeo = extrudedPlanar(lidLocalPts, 0.026, 0.0025);
   const lid = new THREE.Mesh(lidGeo, M.ebony);
   lid.name = 'lid';
-  lid.position.y = -0.026;
+  lid.position.y = -LID_THICK;
   lid.castShadow = true;
   lid.receiveShadow = true;
   lidPivot.add(lid);
@@ -689,9 +836,11 @@ export function buildPiano({ startMidi = 28, endMidi = 108 } = {}) {
   lidEdge.position.y = -0.006;
   lidPivot.add(lidEdge);
   root.add(lidPivot);
+  // 铰链轴：顶面必须低于闭合盖面（LID_PIVOT_Y），否则关盖时铜轴会戳出盖面；
+  // 同时又要高于 rim 顶面，开盖后才能在铰链线上看到一圈轴。
   const hinge = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, DEPTH * 0.58, 12), M.brass);
   hinge.rotation.x = Math.PI / 2;
-  hinge.position.set(hingeX + 0.010, RIM_TOP + 0.008, -0.48);
+  hinge.position.set(hingeX + 0.010, LID_PIVOT_Y - 0.010, -0.48);
   root.add(hinge);
   const prop = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 1, 10), M.brass);
   root.add(prop);
@@ -745,23 +894,31 @@ export function buildPiano({ startMidi = 28, endMidi = 108 } = {}) {
     root.add(wheel);
   });
 
+  // 真琴尺度：键床底面 y=0.174；踏板盒底距地面约 5cm、盒顶约 21cm；踏板面距地面约 10cm。
   const lyreX = cx;
-  const lyreZ = 0.12;
-  const lyreBoxTop = -0.14;
-  const lyreBoxBottom = -0.30;
-  // 参考图琴架：多根竖板条组成 lyre 柱 + 悬空踏板盒 + 后方斜撑杆。
+  const lyreZ = 0.072;                 // 琴架压在键床正下方（键床 z ∈ [-0.03, 0.15]）
+  const KEYBED_UNDER = 0.174;
+  const lyreBoxTop = -0.290;
+  const lyreBoxBottom = -0.450;
+  const pedalDepth = 0.105;
+  const pedalThick = 0.014;
+  const pedalPivotY = FLOOR_Y + 0.108 - pedalThick / 2;  // 踏板面 ≈ 离地 10.8cm
+  const pedalPivotZ = lyreZ + 0.065;                     // 盒体前脸 = 踏板转轴
+  // 琴架柱：从键床底面一直落到踏板盒顶面（旧版柱顶停在 y=-0.02，与键床脱开近 19cm）。
   for (const dx of [-0.054, -0.018, 0.018, 0.054]) {
-    const post = box(0.020, -0.02 - lyreBoxTop, 0.030, M.ebony, 0.004);
-    post.position.set(lyreX + dx, (lyreBoxTop - 0.02) / 2, lyreZ);
+    const postH = KEYBED_UNDER - lyreBoxTop;
+    const post = box(0.020, postH, 0.030, M.ebony, 0.004);
+    post.position.set(lyreX + dx, (KEYBED_UNDER + lyreBoxTop) / 2, lyreZ);
     root.add(post);
   }
-  const lyreBase = box(0.21, lyreBoxTop - lyreBoxBottom, 0.14, M.ebony, 0.008);
-  lyreBase.position.set(lyreX, (lyreBoxTop + lyreBoxBottom) / 2, lyreZ - 0.02);
+  const lyreBase = box(0.20, lyreBoxTop - lyreBoxBottom, 0.13, M.ebony, 0.008);
+  lyreBase.position.set(lyreX, (lyreBoxTop + lyreBoxBottom) / 2, lyreZ);
   root.add(lyreBase);
+  // 后方斜撑杆：盒顶后侧撑到琴身底板下表面。
   for (const dx of [-0.07, 0.07]) {
     root.add(cylinderBetween(
-      new THREE.Vector3(lyreX + dx, lyreBoxTop - 0.02, lyreZ - 0.06),
-      new THREE.Vector3(lyreX + dx * 1.9, -0.02, lyreZ - 0.25),
+      new THREE.Vector3(lyreX + dx, lyreBoxTop - 0.02, lyreZ - 0.05),
+      new THREE.Vector3(lyreX + dx * 1.9, -0.03, lyreZ - 0.24),
       0.013, M.ebonySat, 8,
     ));
   }
@@ -769,13 +926,13 @@ export function buildPiano({ startMidi = 28, endMidi = 108 } = {}) {
   const pedals = [];
   const pedalMeshes = [];
   const pedalGroup = new THREE.Group();
-  const pedalDepth = 0.105;
-  const pedalWidth = 0.030;
-  const pedalPivotZ = lyreZ + 0.05;
-  [-0.045, 0, 0.045].forEach((dx, i) => {
+  const pedalWidth = 0.028;
+  // 三踏板中心间距 ≈ 66mm，外侧两块前端略向外张（真琴踏板的张角）。
+  [-0.033, 0, 0.033].forEach((dx, i) => {
     const pivot = new THREE.Group();
-    pivot.position.set(lyreX + dx, lyreBoxTop - 0.035, pedalPivotZ);
-    const pedal = box(pedalWidth, 0.014, pedalDepth, M.brass, 0.004);
+    pivot.position.set(lyreX + dx, pedalPivotY, pedalPivotZ);
+    pivot.rotation.y = (i - 1) * 0.12;
+    const pedal = box(pedalWidth, pedalThick, pedalDepth, M.brass, 0.004);
     pedal.position.z = pedalDepth / 2;
     pedal.userData.pedalIndex = i;
     pivot.add(pedal);
@@ -790,10 +947,10 @@ export function buildPiano({ startMidi = 28, endMidi = 108 } = {}) {
   const rodTip = new THREE.Vector3();
   function refreshRods() {
     pedals.forEach((p, i) => {
-      rodTip.set(0, 0.007, pedalDepth * 0.88)
+      rodTip.set(0, pedalThick / 2, 0.012)          // 下端接踏板根部
         .applyAxisAngle(new THREE.Vector3(1, 0, 0), p.pivot.rotation.x)
         .add(p.pivot.position);
-      rodBase.set(rodTip.x, -0.024, rodTip.z);
+      rodBase.set(rodTip.x, KEYBED_UNDER + 0.012, rodTip.z);  // 上端插入键床底面
       orientInstancedCylinder(rods, i, rodBase, rodTip);
     });
     rods.instanceMatrix.needsUpdate = true;
